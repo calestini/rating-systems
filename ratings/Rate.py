@@ -2,10 +2,12 @@
 
 import pandas as pd
 import numpy as np
+from numpy import vectorize
 from time import time
-from .helpers import progress, log_loss, squared_error
+from .helpers import progress, log_loss, mlog_loss, squared_error, conf_matrix, graph_confusion_matrix, classif_report, roc_auc_s, graph_roc_auc
 from .Elo import Elo
 from .Glicko import Glicko 
+
 
 """
 Possible improvements:
@@ -37,6 +39,8 @@ c = 50
 
 Elo = Elo()
 Glicko = Glicko()
+
+pd.options.mode.chained_assignment = None
 
 class Rate(object):
     
@@ -80,19 +84,24 @@ class Rate(object):
         self.league = league
         self.season = season
         
-        self.log_loss = 0
-        self.log_loss_tie = 0
-        self.log_loss_home = 0
-        self.squared_error = 0
-        self.squared_error_tie = 0
-        self.squared_error_home = 0
-        self.accuracy = 0
-        
         self.progress = 0
         
         self.start_rating = start_rating
         self.Sigma = Sigma
         self.c = c
+        
+        self.ties_exist = True
+        #predictions in probabilites
+        self.true = np.empty([1, 1])
+        self.pred = np.empty([1, 1])
+        #predictions in classes (i.e. 1, 0)
+        self.true_classes = np.empty([1,1])
+        self.pred_classes = np.empty([1,1])
+
+        self.cm = np.empty([1,1])
+        self.c_report = ''
+        self.roc_auc = dict()
+        self.log_loss = 0
         
     
     def _set_teams(self, data, rating_method):
@@ -158,10 +167,163 @@ class Rate(object):
             data = self._set_team_id(data)
 
         return data
+    
+    
+    def calculate_tie_prob(self, s, p):
+        """
+        Calculate the win, loss, tie probabilities using actual outcomes and predicted home team probabilities
+        """
+        #turning home, tie, away into three different columns 
+        true_h = np.where(s==1, 1, 0)
+        true_a = np.where(s==0, 1, 0)
+        true_t = np.where(s==0.5, 1, 0)
+        
+        nbins = 50
+        
+        y_binned_h, x_bins_h = np.histogram(p, bins=nbins, weights=true_h)
+        y_total_h, x_bins_h = np.histogram(p, bins=nbins)
+        
+        y_binned_a, x_bins_a = np.histogram(p, bins=nbins, weights=true_a)
+        y_total_a, x_bins_a = np.histogram(p, bins=nbins)
+        
+        y_binned_t, x_bins_t = np.histogram(p, bins=nbins, weights=true_t)
+        y_total_t, x_bins_t = np.histogram(p, bins=nbins)
+        
+        #excluding instances where the number of samples in the bin is less than 15
+        mask_h = y_total_h > 15
+        mask_a = y_total_a > 15
+        mask_t = y_total_t > 15
+        
+        y_binned_h = y_binned_h[mask_h]
+        y_binned_a = y_binned_a[mask_a]
+        y_binned_t = y_binned_t[mask_t]
+        
+        y_total_h = y_total_h[mask_h]
+        y_total_a = y_total_a[mask_a]
+        y_total_t = y_total_t[mask_t]
+        
+        x_bins_h = x_bins_h[1:][mask_h]
+        x_bins_a = x_bins_a[1:][mask_a]
+        x_bins_t = x_bins_t[1:][mask_t]
+        
+        mean_h = np.divide(y_binned_h, y_total_h)
+        mean_h[np.isnan(mean_h)]=0
+        
+        mean_a = np.divide(y_binned_a, y_total_a)
+        mean_a[np.isnan(mean_a)]=0
+        
+        mean_t = np.divide(y_binned_t, y_total_t)
+        mean_t[np.isnan(mean_t)]=0
+        
+        #Calculate lines of best fit
+        z_h = np.polyfit(x_bins_h, mean_h, 2)
+        p_h = np.poly1d(z_h)
+        
+        z_a = np.polyfit(x_bins_a, mean_a, 2)
+        p_a = np.poly1d(z_a)
+        
+        z_t = np.polyfit(x_bins_t, mean_t, 2)
+        p_t = np.poly1d(z_t)
 
+        def three_way_probability(p):
+            p_tie =  p_t(p)
+            p_away =  p_a(p)
+            p_home = p_h(p)
+        
+            return p_home, p_away, p_tie     
+        
+        p_home, p_away, p_tie = three_way_probability(p)
+        
+        true = np.column_stack((true_h, true_a, true_t))
+        pred = np.column_stack((p_home, p_away, p_tie))
+        
+        true_outcome = np.where(s == 0.5, 2, s)
+        vpredict_outcome = vectorize(self.predict_outcome)
+        pred_outcome = vpredict_outcome(p_home, p_away, p_tie)
+        
+        self.true = true
+        self.pred = pred
+        self.true_classes = true_outcome
+        self.pred_classes = pred_outcome
+            
+    
+    def predict_outcome(self, p_home, p_away, p_tie, margin=0.1):
+        """
+        Predict outcomes in order to generate confusion matrix and precision, recall, and f-1 score
+        """
+        #Establish a margin where if probability of home and away winning are similar, then it's a tie
+        margin = margin
+        h_a_diff = np.abs(p_away - p_home)
+        
+        #Using an integer to represent ties because evaluation functions require this
+        if (h_a_diff < margin) or (p_tie > p_home and p_tie > p_away):
+            return 2
+        elif p_home > p_away and p_home > p_tie:
+            return 1
+        else: 
+            return 0
+        
+    
+    def evalutate_predictions(self):
+        self.get_confusion_matrix(graph=False)
+        self.get_classification_report()
+        self.get_roc(graph=False)
+        self.get_log_loss()
+
+    
+    def get_confusion_matrix(self, graph=True):
+        """
+        Gets the confusion matrix and graph using current data
+        """
+        cm = conf_matrix(self.true_classes, self.pred_classes)
+        
+        if graph == True:
+            graph_confusion_matrix(cm)
+        
+        self.cm = cm
+        
+        return cm
+        
+        
+    def get_classification_report(self):
+        c_report = classif_report(self.true_classes, self.pred_classes)
+        self.c_report = c_report
+        
+        return c_report
+        
+    
+    def get_roc(self, graph=True):
+        """
+        Gets the ROC AUC using current data
+        """
+        roc_auc, fpr, tpr = roc_auc_s(self.true, self.pred)
+        
+        n_classes = self.true.shape[1]
+        
+        if graph == True:
+            graph_roc_auc(roc_auc, fpr, tpr, n_classes)
+            
+        self.roc_auc = roc_auc
+        
+        return roc_auc
+    
+    
+    def get_log_loss(self):
+        """
+        Gets the log loss using current data
+        """
+        if self.ties_exist == True:
+            l_loss = mlog_loss(self.true, self.pred)
+        else:
+            l_loss = log_loss(self.true, self.pred)
+            
+        self.log_loss = l_loss
+            
+        return l_loss
+        
 
     def calculate_elo(self, data, K, h=0, Sd=False, Sd_method='Logistic', m=1, results_by_league=False, results_by_season=False, 
-                      rt_mean=False, rt_mean_amnt=1/3, time_scale=False, time_scale_factor=2, start_rating=start_rating):
+                      rt_mean=False, rt_mean_amnt=1/3, time_scale=False, time_scale_factor=2, start_rating=start_rating, tie_probability=True):
         """
         Calculate elo rating for fixtures, accepts a dataframe
         
@@ -177,6 +339,7 @@ class Rate(object):
 
         Note that if results_by_league is False and results_by_season is True, only one league should be passed as data
         """
+        
         self.ratings_fixtures = pd.DataFrame()
         self.ratings_teams_fixtures = pd.DataFrame()
         self.ratings_teams_seasons = pd.DataFrame()
@@ -285,7 +448,8 @@ class Rate(object):
                 league_team_season_r = league_team_season_r.append(season_team_r)
 
             self.ratings_teams = league_team_season_r.sort_values([self.league, 'rating'], ascending = False)
-
+        
+        """
         #calculate log loss of the predictions
         s = data['outcome'].values
         p = self.ratings_fixtures['localteam_p'].values
@@ -307,12 +471,29 @@ class Rate(object):
         sq_err_home = squared_error(s, p_home)
         self.log_loss_home = l_loss_home
         self.squared_error_tie = sq_err_home
-
+        """
+        s = data['outcome'].values
+        p = self.ratings_fixtures['localteam_p'].values
+        ties_exist = ((s == 0.5).sum) != 0
+        
+        if ties_exist:
+            self.ties_exist = True
+        else:
+            self.ties_exist = False
+            self.true = s
+            self.pred = p
+            self.true_classes = s
+            self.pred_classes = np.where(p > 0.5, 1, 0)
+        
+        if tie_probability == True and ties_exist:
+            self.calculate_tie_prob(s, p)            
+            
+        self.evalutate_predictions()
+        
         end = time()
         
         progress(100, 100, status="Hooray!")
-        print ('Calculations completed in %f seconds with a log loss of %f and a mean squared error of %f' % (end-start, l_loss, sq_err))
-        print ('All games tied: log loss of %f and a mean squared error of %f; all games won by home team: log loss of %f and a mean squared error of %f' % (l_loss_tie, sq_err_tie, l_loss_home, sq_err_home))
+        print ('Calculations completed in %f seconds' % (end-start))
 
 
     def _set_ratings_elo(self, data, K, h=0, Sd=False, Sd_method='Logistic', m=1, prev_ratings=None, time_scale=False, time_scale_factor=2):
@@ -449,7 +630,8 @@ class Rate(object):
         return teams
     
     
-    def calculate_glicko(self, data, c=c, start_rating=start_rating, Sigma=Sigma, h=0, results_by_league=False, results_by_season=False):
+    def calculate_glicko(self, data, c=c, start_rating=start_rating, Sigma=Sigma, h=0, 
+                         results_by_league=False, results_by_season=False, tie_probability=False):
         """
         Calculate elo rating for fixtures, accepts a dataframe
         
@@ -572,9 +754,7 @@ class Rate(object):
             self.ratings_teams = league_team_season_r.sort_values([self.league, 'rating'], ascending = False)
     
         #calculate log loss of the predictions
-        s = data['outcome'].values
-        p = self.ratings_fixtures['localteam_p'].values
-        
+        """
         l_loss = log_loss(s, p)
         sq_err = squared_error(s, p)
         
@@ -592,12 +772,30 @@ class Rate(object):
         sq_err_home = squared_error(s, p_home)
         self.log_loss_home = l_loss_home
         self.squared_error_tie = sq_err_home
-    
+        """
+        
+        s = data['outcome'].values
+        p = self.ratings_fixtures['localteam_p'].values
+        ties_exist = ((s == 0.5).sum) != 0
+        
+        if ties_exist:
+            self.ties_exist = True
+        else:
+            self.ties_exist = False
+            self.true = s
+            self.pred = p
+            self.true_classes = s
+            self.pred_classes = np.where(p > 0.5, 1, 0)
+        
+        if tie_probability == True and ties_exist:
+            self.calculate_tie_prob(s, p)
+        
+        self.evalutate_predictions()
+        
         end = time()
         
         progress(100, 100, status="Hooray!")
-        print ('Calculations completed in %f seconds with a log loss of %f and a mean squared error of %f' % (end-start, l_loss, sq_err))
-        print ('All games tied: log loss of %f and a mean squared error of %f; all games won by home team: log loss of %f and a mean squared error of %f' % (l_loss_tie, sq_err_tie, l_loss_home, sq_err_home))
+        print ('Calculations completed in %f seconds' % (end-start))
         
     
     def _set_ratings_glicko(self, data, prev_ratings=None, h=0):
