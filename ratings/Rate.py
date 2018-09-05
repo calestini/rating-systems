@@ -23,7 +23,7 @@ Possible improvements:
     - parallel computing (not sure if this can be done)
 
     3. Other rating systems:
-    - Glicko, Glicko_2
+    - Glicko_2
     - TrueSkill
     - FIDE
     - Whole History (https://www.remi-coulom.fr/WHR/WHR.pdf)
@@ -31,11 +31,15 @@ Possible improvements:
     - Decayed History
     - pi-rating
 
+Learnings:
+    - use less "appends"
+    - use less "loc"
+    - numpy over pandas
 """
 
 start_rating = 1500
 Sigma = 350
-c = 50
+c = 20
 
 Elo = Elo()
 Glicko = Glicko()
@@ -61,7 +65,15 @@ class Rate(object):
             ratings_fixures: ratings before and after each fixture for each team, as well as probability of each team winning
             ratings_teams: most recent ratings for each team in the fixture list
             ratings_teams_fixtures: ratings for each team fixture over time - can be used to plot trends
-            ratings_teams_seasons: ratings for each team in each season (only available when results_by_season is set to true) 
+            ratings_teams_seasons: ratings for each team in each season (only available when results_by_season is set to true)
+            true: match outcomes
+            pred: match predictions
+            true_classes: match outcomes, separated into different classes (created to handle ties)
+            pred_classes: match predictions, separated into different classes (created to handle ties)
+            cm: confusion matrix
+            c_report: classification report - includes precision, recall, f1-score and support
+            roc_auc: ROC AUC score
+            log_loss: log loss score
     """
     
     def __init__(self,
@@ -105,7 +117,9 @@ class Rate(object):
         
     
     def _set_teams(self, data, rating_method):
-        
+        """
+        Turn list of fixtures into teams, and set initial score
+        """
         teams_local = data[[self.localteam_id, self.localteam_name]] \
                     .drop_duplicates() \
                     .rename(columns={self.localteam_id: 'team_id', self.localteam_name: 'team_name'})
@@ -126,7 +140,9 @@ class Rate(object):
     
     
     def _set_team_id(self, data):
-        
+        """
+        Set the team id if team id does not exist
+        """
         teams_local = data[[self.localteam_name]].drop_duplicates().rename(columns={self.localteam_name: 'team_name'})
         teams_visitor = data[[self.visitorteam_name]].drop_duplicates().rename(columns={self.visitorteam_name: 'team_name'})
         teams = teams_local.append(teams_visitor, ignore_index = True).drop_duplicates()
@@ -142,7 +158,9 @@ class Rate(object):
 
 
     def _process_data(self, data):
-
+        """
+        Process fixture data - order fixtures and assign outcomes
+        """
         #Determine outcome for each fixture
         conditions = [
             data[self.localteam_score] > data[self.visitorteam_score],
@@ -190,9 +208,9 @@ class Rate(object):
         y_total_t, x_bins_t = np.histogram(p, bins=nbins)
         
         #excluding instances where the number of samples in the bin is less than 15
-        mask_h = y_total_h > 15
-        mask_a = y_total_a > 15
-        mask_t = y_total_t > 15
+        mask_h = y_total_h > 20
+        mask_a = y_total_a > 20
+        mask_t = y_total_t > 20
         
         y_binned_h = y_binned_h[mask_h]
         y_binned_a = y_binned_a[mask_a]
@@ -264,7 +282,7 @@ class Rate(object):
             return 0
         
     
-    def evalutate_predictions(self):
+    def evaluate_predictions(self):
         self.get_confusion_matrix(graph=False)
         self.get_classification_report()
         self.get_roc(graph=False)
@@ -286,6 +304,9 @@ class Rate(object):
         
         
     def get_classification_report(self):
+        """
+        Gets the classification report - print the result to see the formatted table
+        """
         c_report = classif_report(self.true_classes, self.pred_classes)
         self.c_report = c_report
         
@@ -312,14 +333,27 @@ class Rate(object):
         """
         Gets the log loss using current data
         """
+        len_s = len(self.true)
         if self.ties_exist == True:
             l_loss = mlog_loss(self.true, self.pred)
+            n_classes = self.true.shape[1]
+            bm_pred = np.empty([1, 1])
+            bm_arr = dict()
+            for i in range(n_classes):
+                mean = np.mean(self.true[:, i])
+                bm_arr[i] = np.full((len_s, ), mean, dtype=float)
+            bm_pred = np.column_stack(([bm_arr[i] for i in range(n_classes)]))
+            bm_l_loss = mlog_loss(self.true, bm_pred)
         else:
             l_loss = log_loss(self.true, self.pred)
+            mean_s = np.mean(self.true)
+            bm_arr = np.full((len_s, ), mean_s, dtype=float)
+            bm_l_loss = log_loss(self.true, bm_arr)
             
         self.log_loss = l_loss
+        self.bm_log_loss = bm_l_loss
             
-        return l_loss
+        return l_loss, bm_l_loss
         
 
     def calculate_elo(self, data, K, h=0, Sd=False, Sd_method='Logistic', m=1, results_by_league=False, results_by_season=False, 
@@ -336,11 +370,13 @@ class Rate(object):
         :param results_per_season: calculate ratings for each season individually, defaults to False
         :param rt_mean: regress ratings to league mean after each season, defaults to False
         :param rt_mean_degree: amount to regress to mean, defaults to 1/3
+        :param tie_probability: recommended to be left to 'True' - calculates tie probability when there are tie outcomes
 
         Note that if results_by_league is False and results_by_season is True, only one league should be passed as data
         """
         
         self.ratings_fixtures = pd.DataFrame()
+        self.ratings_teams = pd.DataFrame()
         self.ratings_teams_fixtures = pd.DataFrame()
         self.ratings_teams_seasons = pd.DataFrame()
         self.progress = 0
@@ -488,7 +524,7 @@ class Rate(object):
         if tie_probability == True and ties_exist:
             self.calculate_tie_prob(s, p)            
             
-        self.evalutate_predictions()
+        self.evaluate_predictions()
         
         end = time()
         
@@ -497,6 +533,9 @@ class Rate(object):
 
 
     def _set_ratings_elo(self, data, K, h=0, Sd=False, Sd_method='Logistic', m=1, prev_ratings=None, time_scale=False, time_scale_factor=2):
+        """
+        Calculates elo rating for every row of fixture data passed
+        """
 
         if prev_ratings is None:
             teams = self._set_teams(data, rating_method='Elo')
@@ -508,12 +547,30 @@ class Rate(object):
         else:
             ratings_function = 'Elo.elo_rating(localteam_r, visitorteam_r, K, outcome, score_diff=score_diff, start_rating=self.start_rating, Sd_method=Sd_method, m=m, h=h)'
         
-        for row in data.itertuples(index=True):
+        """
+        #get location of columns
+        index_loc = 0
+        order_loc = data.columns.get_loc(self.order)
+        localteam_id_loc = data.columns.get_loc(self.localteam_id)
+        visitorteam_id_loc = data.columns.get_loc(self.visitorteam_id)
+        localteam_name_loc = data.columns.get_loc(self.localteam_name)
+        visitorteam_name_loc = data.columns.get_loc(self.visitorteam_name)
+        outcome_loc = data.columns.get_loc("outcome")
+        visitorteam_outcome_loc = data.columns.get_loc("visitorteam_outcome")
+        localteam_r_loc = data.columns.get_loc(self.localteam_r)
+        visitorteam_r_loc = data.columns.get_loc(self.visitorteam_r)
+        """
+        recarray = data.to_records(index=True)
+        fixture_ratings = dict()
+        new_local_ratings = dict()
+        new_visitor_ratings = dict()
+        
+        for row in recarray:
             
             self.progress += 1
-            progress(self.progress, self.total, status=row.Index)
-
-            index = row.Index
+            progress(self.progress, self.total, status=row[0])
+            
+            index = row[0]
             order = getattr(row, self.order)
             localteam_id = getattr(row, self.localteam_id)
             visitorteam_id = getattr(row, self.visitorteam_id)
@@ -529,14 +586,13 @@ class Rate(object):
             localteam_p, visitorteam_p, localteam_post_r, visitorteam_post_r = eval(ratings_function)
 
             #assign probabilities for current game and post-game ratings
-            new_rating = pd.DataFrame(data = {'localteam_r': localteam_r,
-                                              'visitorteam_r': visitorteam_r,
-                                              'localteam_p': localteam_p,
-                                              'visitorteam_p': visitorteam_p,
-                                              'localteam_post_r': localteam_post_r,
-                                              'visitorteam_post_r': visitorteam_post_r},
-                                    index = [index])
-            self.ratings_fixtures = self.ratings_fixtures.append(new_rating)
+            fixture_ratings[index] = { 'result_order': order,
+                                       'localteam_r': localteam_r,
+                                      'visitorteam_r': visitorteam_r,
+                                      'localteam_p': localteam_p,
+                                      'visitorteam_p': visitorteam_p,
+                                      'localteam_post_r': localteam_post_r,
+                                      'visitorteam_post_r': visitorteam_post_r}
 
             #update team rating without time scaling
             if time_scale == False:
@@ -544,7 +600,7 @@ class Rate(object):
                 teams.loc[visitorteam_id, 'rating'] = visitorteam_post_r
                 
                 #assign probabilities for each team over time
-                new_local_rating = {'id': index,
+                new_local_ratings[index] = {'id': index,
                                     'order': order,
                                     'position': 'local',
                                     'team_id': localteam_id,
@@ -553,7 +609,7 @@ class Rate(object):
                                     'team_p': localteam_p,
                                     'outcome': outcome,
                                     'team_post_r': localteam_post_r}
-                new_visitor_rating = {'id': index,
+                new_visitor_ratings[index] = {'id': index,
                                         'order': order,
                                         'position': 'visitor',
                                         'team_id': visitorteam_id,
@@ -562,7 +618,6 @@ class Rate(object):
                                         'team_p': visitorteam_p,
                                         'outcome': visitorteam_outcome,
                                         'team_post_r': visitorteam_post_r}
-                self.ratings_teams_fixtures = self.ratings_teams_fixtures.append([new_local_rating, new_visitor_rating], ignore_index = True)
                 
             #update team rating with time scaling
             elif time_scale == True:
@@ -605,7 +660,7 @@ class Rate(object):
                     vteam_post_r_ts = visitorteam_post_r
             
                 #assign probabilities for each team over time
-                new_local_rating = {'id': index,
+                new_local_ratings[index] = {'id': index,
                                     'order': order,
                                     'position': 'local',
                                     'team_id': localteam_id,
@@ -615,7 +670,7 @@ class Rate(object):
                                     'outcome': outcome,
                                     'team_post_r': localteam_post_r,
                                     'team_post_r_ts': lteam_post_r_ts}
-                new_visitor_rating = {'id': index,
+                new_visitor_ratings[index] = {'id': index,
                                         'order': order,
                                         'position': 'visitor',
                                         'team_id': visitorteam_id,
@@ -625,25 +680,25 @@ class Rate(object):
                                         'outcome': visitorteam_outcome,
                                         'team_post_r': visitorteam_post_r,
                                         'team_post_r_ts': vteam_post_r_ts}
-                self.ratings_teams_fixtures = self.ratings_teams_fixtures.append([new_local_rating, new_visitor_rating], ignore_index = True)
+        
+        self.ratings_fixtures = self.ratings_fixtures.append(pd.DataFrame.from_dict(fixture_ratings, orient='index'), ignore_index = False).sort_values('result_order')
+        self.ratings_teams_fixtures = self.ratings_teams_fixtures.append(pd.DataFrame.from_dict(new_local_ratings, orient='index'), ignore_index = True)
+        self.ratings_teams_fixtures = self.ratings_teams_fixtures.append(pd.DataFrame.from_dict(new_visitor_ratings, orient='index'), ignore_index = True)
                 
         return teams
     
     
     def calculate_glicko(self, data, c=c, start_rating=start_rating, Sigma=Sigma, h=0, 
-                         results_by_league=False, results_by_season=False, tie_probability=False):
+                         results_by_league=False, results_by_season=False, tie_probability=True):
         """
-        Calculate elo rating for fixtures, accepts a dataframe
+        Calculate Glicko rating for fixtures, accepts a dataframe
         
-        :param K: constant used to gauge magnitude of effect for each match outcome
-        :param h: home-team advantage, defaults to 0
-        :param Sd: either True or False - takes into account score difference when set to True
-        :param Sd_method: method used to account for score difference, options are 'Logistic', 'Constant', or 'Five_thirty_eight', defaults to 'Logistic'
-        :param m: multiplier for score difference - defaults to 0, is not used with 'Five_thirty_eight' method
+        :param c: determines how much RD goes back up between periods of assessment, defaults to 20
+        :param start_rating: determines where the ratings start, defaults to 1500
+        :param Sigma: the start RD for every team, defaults to 350
         :param results_by_league: calculate ratings for each league individually, defaults to False
         :param results_per_season: calculate ratings for each season individually, defaults to False
-        :param rt_mean: regress ratings to league mean after each season, defaults to False
-        :param rt_mean_degree: amount to regress to mean, defaults to 1/3
+        :param tie_probability: recommended to be left to 'True' - calculates tie probability when there are tie outcomes
     
         Note that if results_by_league is False and results_by_season is True, only one league should be passed as data
         """
@@ -790,7 +845,7 @@ class Rate(object):
         if tie_probability == True and ties_exist:
             self.calculate_tie_prob(s, p)
         
-        self.evalutate_predictions()
+        self.evaluate_predictions()
         
         end = time()
         
@@ -806,13 +861,18 @@ class Rate(object):
             teams = self._set_teams(data, rating_method='Glicko')
         else:
             teams = prev_ratings        
+            
+        recarray = data.to_records(index=True)
+        fixture_ratings = dict()
+        new_local_ratings = dict()
+        new_visitor_ratings = dict()
         
-        for row in data.itertuples(index=True):
+        for row in recarray:
             
             self.progress += 1
             progress(self.progress, self.total, status=row.Index)
 
-            index = row.Index
+            index = row[0]
             order = getattr(row, self.order)
             localteam_id = getattr(row, self.localteam_id)
             visitorteam_id = getattr(row, self.visitorteam_id)
@@ -832,7 +892,7 @@ class Rate(object):
                                                                                               start_rating=self.start_rating, Sigma=self.Sigma, c=self.c, h=h)
 
             #assign probabilities for current game and post-game ratings
-            new_rating = pd.DataFrame(data = {'localteam_r': localteam_r,
+            fixture_ratings[index] = {'localteam_r': localteam_r,
                                               'visitorteam_r': visitorteam_r,
                                               'localteam_RD': localteam_RD,
                                               'visitorteam_RD': visitorteam_RD,
@@ -841,12 +901,10 @@ class Rate(object):
                                               'localteam_post_r': localteam_post_r,
                                               'visitorteam_post_r': visitorteam_post_r,
                                               'localteam_post_RD': localteam_post_RD,
-                                              'visitorteam_post_RD': visitorteam_post_RD},
-                                    index = [index])
-            self.ratings_fixtures = self.ratings_fixtures.append(new_rating)
+                                              'visitorteam_post_RD': visitorteam_post_RD}
             
             #assign probabilities for each team over time
-            new_local_rating = {'id': index,
+            new_local_ratings[index] = {'id': index,
                                 'order': order,
                                 'position': 'local',
                                 'team_id': localteam_id,
@@ -857,7 +915,7 @@ class Rate(object):
                                 'outcome': outcome,
                                 'team_post_r': localteam_post_r,
                                 'team_post_RD': localteam_post_RD}
-            new_visitor_rating = {'id': index,
+            new_visitor_ratings[index] = {'id': index,
                                     'order': order,
                                     'position': 'visitor',
                                     'team_id': visitorteam_id,
@@ -868,11 +926,14 @@ class Rate(object):
                                     'outcome': visitorteam_outcome,
                                     'team_post_r': visitorteam_post_r,
                                     'team_post_RD': visitorteam_post_RD}
-            self.ratings_teams_fixtures = self.ratings_teams_fixtures.append([new_local_rating, new_visitor_rating], ignore_index = True)
 
             teams.loc[localteam_id, 'rating'] = localteam_post_r
             teams.loc[visitorteam_id, 'rating'] = visitorteam_post_r
             teams.loc[localteam_id, 'RD'] = localteam_post_RD
             teams.loc[visitorteam_id, 'RD'] = visitorteam_post_RD
+        
+        self.ratings_fixtures = self.ratings_fixtures.append(pd.DataFrame.from_dict(fixture_ratings, orient='index'), ignore_index = False).sort_values('result_order')
+        self.ratings_teams_fixtures = self.ratings_teams_fixtures.append(pd.DataFrame.from_dict(new_local_ratings, orient='index'), ignore_index = True)
+        self.ratings_teams_fixtures = self.ratings_teams_fixtures.append(pd.DataFrame.from_dict(new_visitor_ratings, orient='index'), ignore_index = True)
                 
         return teams

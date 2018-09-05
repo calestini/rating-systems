@@ -48,9 +48,9 @@ def mlog_loss(true, pred):
     target_names = tie_target_names
     
     for i, class_name in enumerate(target_names):
-        l_loss[class_name] = -true[i]*np.log10(pred[i])
-        
-    l_loss_all = np.sum([l_loss[class_name] for class_name in target_names])
+        l_loss[class_name] = -true[:, i]*np.log10(pred[:, i])
+    
+    l_loss_all = np.sum([l_loss[class_name] for class_name in target_names], axis =0)
     
     return np.mean(l_loss_all)
     

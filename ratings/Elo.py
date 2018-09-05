@@ -52,22 +52,22 @@ class Elo(object):
         # Case -1 When Player A wins
         # Updating the Elo Ratings
         if (d == 1) :
-            Ra = Ra + K * Sd * (1 - Pa)
-            Rb = Rb + K * Sd * (0 - Pb)
+            Ra_new = Ra + K * Sd * (1 - Pa)
+            Rb_new = Rb + K * Sd * (0 - Pb)
 
         # Case -2 When Player B wins
         # Updating the Elo Ratings
         elif (d == 0.5):
-            Ra = Ra + K * Sd * (0.5 - Pa)
-            Rb = Rb + K * Sd * (0.5 - Pb)
+            Ra_new = Ra + K * Sd * (0.5 - Pa)
+            Rb_new = Rb + K * Sd * (0.5 - Pb)
 
         # Case -3 When it's a tie
         # Updating the Elo Ratings
         else:
-            Ra = Ra + K * Sd * (0 - Pa)
-            Rb = Rb + K * Sd * (1 - Pb)
+            Ra_new = Ra + K * Sd * (0 - Pa)
+            Rb_new = Rb + K * Sd * (1 - Pb)
 
-        return Pa, Pb, Ra, Rb
+        return Pa, Pb, Ra_new, Rb_new
 
     
     def _weighted_r_diff(self, r_chng, a):
