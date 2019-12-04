@@ -17,7 +17,6 @@ class Glicko(object):
 		- http://www.glicko.net/glicko/glicko.pdf
 		- https://en.wikipedia.org/wiki/Glicko_rating_system
 
-
 	"""
 
 	def __init__(self, start_rating=1500, c=50, q=None, sigma=350, sigma_min=30, h=0, width=400,):
