@@ -1,0 +1,2 @@
+class InvalidSDMedhod(Exception):
+	pass

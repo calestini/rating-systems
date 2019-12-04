@@ -1,2 +1,14 @@
-# rating-systems
-Implementation of the Elo and Glicko rating systems to rank sports teams
+# Rating Systems
+
+Implementation of the rating systems to rank sports teams.
+
+## Available
+
+- Elo
+- Glicko
+
+## Usage
+
+## Motivation
+
+## Thoughts

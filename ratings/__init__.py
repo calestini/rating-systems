@@ -1,4 +1,4 @@
-from .Elo import Elo
-from .Glicko import Glicko
+from .elo import Elo
+from .glicko import Glicko
 from .helpers import log_loss, squared_error
-from .Rate import Rate
+from .rate import Rate
