@@ -19,11 +19,12 @@ class Glicko(object):
 
 	"""
 
-	def __init__(self, start_rating=1500, c=50, q=None, sigma=350, sigma_min=30, h=0, width=400,):
+	def __init__(self, start_rating=1500, c=50, q=None, sigma=350, sigma_min=30, h=0, width=400):
 		"""
 		Params:
 		-------
-			- c: determines how much RD goes back up between periods of assessment, defaults to 50
+			- c: determines how much RD goes back up between periods of
+				assessment, defaults to 50
 			- start_rating: determines where the ratings start, defaults to 1500
 			- sigma: the start RD for every team, defaults to 350
 		"""
@@ -50,14 +51,15 @@ class Glicko(object):
 		-------
 			- rd: ratings deviation;
 		"""
-		return 1 / np.sqrt((1 + 3 * np.power(self.q, 2) * np.power(rd, 2)) / np.power(np.pi, 2))
+		return 1 / np.sqrt((1 + 3 \
+				* np.power(self.q, 2) * np.power(rd, 2)) / np.power(np.pi, 2))
 
 
 	def probability(self, g, home_prev, vis_prev):
 		"""
 		Calculate expected result
 		"""
-		return 1 / (1 + np.power(10, -g * ((home_prev - vis_prev) / self.width)))
+		return 1 / (1 + np.power(10, -g * ((home_prev - vis_prev) /self.width)))
 
 
 	def rd_new(self, g, E, rd):
@@ -77,27 +79,29 @@ class Glicko(object):
 
 		visitor_outcome = abs(outcome - 1)
 
-		g_b = self.g(rd_vis)
+		g_vis = self.g(rd_vis)
+		g_home = self.g(rd_home)
 
-		p_home = self.probability(g_b, home_prev, vis_prev)
+		p_home = self.probability(g_vis, home_prev, vis_prev)
 
-		if rda > self.sigma_min:
-			rda_new = self.rd_new(g_b, p_home, rd_home)
+		if rd_home > self.sigma_min:
+			rd_home_new = self.rd_new(g_vis, p_home, rd_home)
 		else:
-			rda_new = rd_home
+			rd_home_new = rd_home
 
-		home_post = home_prev + self.q * np.power(rda_new, 2) * g_b * (outcome - p_home)
+		home_post = home_prev + \
+				self.q * np.power(rd_home_new, 2) * g_vis * (outcome - p_home)
 
-		g_a = self.g(rd_home)
 
-		p_vis = self.probability(g_a, vis_prev, home_prev)
+		p_vis = self.probability(g_home, vis_prev, home_prev)
 
-		if rdb > Sigma_min:
-			rdb_new = self.rd_new(g_b, p_vis, rd_vis)
+		if rd_vis > self.sigma_min:
+			rd_vis_new = self.rd_new(g_vis, p_vis, rd_vis)
 		else:
-			rdb_new = rd_vis
+			rd_vis_new = rd_vis
 
-		rdb_new = self.rd_new(g_a, p_vis, rd_vis)
-		vis_post = vis_prev + self.q * np.power(rdb_new, 2) * g_a * (visitor_outcome - p_vis)
+		rd_vis_new = self.rd_new(g_home, p_vis, rd_vis)
+		vis_post = vis_prev + self.q \
+				* np.power(rd_vis_new, 2) * g_home * (visitor_outcome - p_vis)
 
-		return p_home, p_vis, home_post, vis_post, rda_new, rdb_new
+		return p_home, p_vis, home_post, vis_post, rd_home_new, rd_vis_new
