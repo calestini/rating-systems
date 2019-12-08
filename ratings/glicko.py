@@ -77,7 +77,7 @@ class Glicko(object):
 		rd_home = self.onset_rd(rd_home, 1)
 		rd_vis = self.onset_rd(rd_vis, 1)
 
-		visitor_outcome = abs(outcome - 1)
+		visitor_outcome = abs(outcome - 1.)
 
 		g_vis = self.g(rd_vis)
 		g_home = self.g(rd_home)
