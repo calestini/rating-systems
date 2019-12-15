@@ -1,17 +1,13 @@
 # -*- coding: utf-8 -*-
 import numpy as np
 import math
+import logging
 
-# q = math.log(10) / 400
-# c = 50
-# start_rating = 1500
-# Sigma = 350
-# Sigma_min = 30
 
 class Glicko(object):
 
 	"""
-	A python object to calculate Glicko 1 ratings.
+	A python object to calculate Glicko [1] ratings.
 
 	For more information on GLicko ratings:
 		- http://www.glicko.net/glicko/glicko.pdf
@@ -19,7 +15,8 @@ class Glicko(object):
 
 	"""
 
-	def __init__(self, start_rating=1500, c=50, q=None, sigma=350, sigma_min=30, h=0, width=400):
+	def __init__(self, start_rating=1500, c=50,
+							q=None, sigma=350, sigma_min=30, h=0, width=400):
 		"""
 		Params:
 		-------
@@ -31,77 +28,92 @@ class Glicko(object):
 		self.start_rating = start_rating
 		self.sigma = sigma
 		self.sigma_min = sigma_min
-		self.q = q or math.log(10) / 400
+		self.width = width
+		self.q = q or math.log(10) / self.width
 		self.c = c
 		self.h = h
-		self.width = width
 
 
-	def onset_rd(self, rd_old, t):
+	def onset_rd(self, rd_old, t=1):
 		"""
-		Calculate the onset ratings deviation at the beginning of a period
+		Calculate the onset ratings deviation at the beginning of a period.
+		This calulation updates the rd given the time passed, to add/remove
+		uncertainty based on time passed.
+		Params:
+		-------
+			- rd_old: rating deviation coming to match
 		"""
-		return np.sqrt(np.power(rd_old, 2) + np.power(self.c, 2) * t)
+		rd = np.sqrt(np.power(rd_old, 2) + (np.power(self.c, 2) * t))
+		# logging.warning(f'Onset RD: {rd}')
+		return rd
 
 
 	def g(self, rd):
 		"""
-		Calculate 'g' for the opponent.
+		Calculate 'g' for the opponent using onset rd
 		Params:
 		-------
 			- rd: ratings deviation;
 		"""
-		return 1 / np.sqrt((1 + 3 \
+		return 1 / np.sqrt(1 + (3 \
 				* np.power(self.q, 2) * np.power(rd, 2)) / np.power(np.pi, 2))
 
 
-	def probability(self, g, home_prev, vis_prev):
+	def probability(self, g, ra, rb):
 		"""
 		Calculate expected result
 		"""
-		return 1 / (1 + np.power(10, -g * ((home_prev - vis_prev) /self.width)))
+		return 1 / (1 + np.power(10, -g * ((ra - rb) /self.width)))
+
+
+	def dsqrd(self, g, E):
+		"""
+		Calculate d^2
+		"""
+		return 1 / (np.power(self.q, 2) * np.power(g, 2) * E * (1- E))
 
 
 	def rd_new(self, g, E, rd):
 		"""
 		Calculate post-match RD (ratings deviation)
 		"""
-		d = 1 / (np.power(self.q, 2) * np.power(g, 2) * E * (1- E))
-		return 1 / np.sqrt(1 / np.power(rd, 2) + 1 / d)
+		if rd <= self.sigma_min:
+			return rd
+
+		d2 = self.dsqrd(g=g, E=E)
+		# logging.warning(f'd2: {d2}')
+		return 1 / np.sqrt(1 / np.power(rd, 2) + 1 / d2)
+
+
+	def update_rating(self, r_pre, rd_pre, r_opp, outcome):
+		"""
+		Update a player's rating given their rd and the opponent rating, and
+		the outcome.
+		"""
+		onsetrd = self.onset_rd(rd_pre, 1)
+		g = self.g(onsetrd)
+		# logging.warning(f'G: {g}')
+		E = self.probability(g, r_pre, r_opp)
+		rd_new = self.rd_new(g, E, onsetrd)
+
+		r_post =r_pre + self.q*(np.power(rd_new, 2))*g*(outcome - E)
+
+		return E, r_post, rd_new
 
 
 	def glicko_rating(self, home_prev, vis_prev, rd_home, rd_vis, outcome):
 		"""
-		Calculate post-match rating
+		Calculate post-match rating for home and visitor teams
+		Params:
+		-------
+			- outcome (1.0, 0.5, 0.0): always from home-team perspective
 		"""
-		rd_home = self.onset_rd(rd_home, 1)
-		rd_vis = self.onset_rd(rd_vis, 1)
+		## flipping the outcome's perspective
+		v_outcome = abs(outcome - 1.)
 
-		visitor_outcome = abs(outcome - 1.)
+		E_home, home_post, rd_home_new = \
+					self.update_rating(home_prev, rd_home, vis_prev, outcome)
+		E_vis, vis_post, rd_vis_new = \
+					self.update_rating(vis_prev, rd_vis, home_prev, v_outcome)
 
-		g_vis = self.g(rd_vis)
-		g_home = self.g(rd_home)
-
-		p_home = self.probability(g_vis, home_prev, vis_prev)
-
-		if rd_home > self.sigma_min:
-			rd_home_new = self.rd_new(g_vis, p_home, rd_home)
-		else:
-			rd_home_new = rd_home
-
-		home_post = home_prev + \
-				self.q * np.power(rd_home_new, 2) * g_vis * (outcome - p_home)
-
-
-		p_vis = self.probability(g_home, vis_prev, home_prev)
-
-		if rd_vis > self.sigma_min:
-			rd_vis_new = self.rd_new(g_vis, p_vis, rd_vis)
-		else:
-			rd_vis_new = rd_vis
-
-		rd_vis_new = self.rd_new(g_home, p_vis, rd_vis)
-		vis_post = vis_prev + self.q \
-				* np.power(rd_vis_new, 2) * g_home * (visitor_outcome - p_vis)
-
-		return p_home, p_vis, home_post, vis_post, rd_home_new, rd_vis_new
+		return E_home, E_vis, home_post, vis_post, rd_home_new, rd_vis_new
