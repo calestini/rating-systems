@@ -101,7 +101,7 @@ class Glicko(object):
 		return E, r_post, rd_new
 
 
-	def glicko_rating(self, home_prev, vis_prev, rd_home, rd_vis, outcome):
+	def rate(self, home_prev, vis_prev, outcome, rd_home, rd_vis):
 		"""
 		Calculate post-match rating for home and visitor teams
 		Params:
@@ -115,5 +115,9 @@ class Glicko(object):
 					self.update_rating(home_prev, rd_home, vis_prev, outcome)
 		E_vis, vis_post, rd_vis_new = \
 					self.update_rating(vis_prev, rd_vis, home_prev, v_outcome)
-
+		self.returns = [
+			'phome','pvis',
+			'hpost','vpost',
+			'h_rd_new','v_rd_new'
+		]
 		return E_home, E_vis, home_post, vis_post, rd_home_new, rd_vis_new

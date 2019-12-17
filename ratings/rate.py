@@ -1,942 +1,132 @@
-# -*- coding: utf-8 -*-
-
-import pandas as pd
 import numpy as np
-from numpy import vectorize
-from time import time
-from .helpers import progress, log_loss, mlog_loss, squared_error, conf_matrix, graph_confusion_matrix, classif_report, roc_auc_s, graph_roc_auc
-from .elo import Elo
-from .glicko import Glicko
+import pandas as pd
+'''
+TODO:
 
-## silence warning in runs.
-pd.options.mode.chained_assignment = None
+	- Add weight decay to Elo ratings;
+	- Add possibility of multiple seasons (not leagues.);
+	- Maybe make sigma part of kwargs, and handle within Glicko model obj;
 
-"""
-Possible improvements:
-	1. Algorithmic
-	- Change K based on tournament played
-	- give high k factor to new players and lower as number of games played increases
-	- root mean squared error to test for stability
-	- Handle draws
-
-	2. Function:
-	- can turn calculations into lists
-	- logging
-	- parallel computing (not sure if this can be done)
-
-	3. Other rating systems:
-	- Glicko_2
-	- TrueSkill
-	- FIDE
-	- Whole History (https://www.remi-coulom.fr/WHR/WHR.pdf)
-	- Edo
-	- Decayed History
-	- pi-rating
-
-Learnings:
-	- use less "appends"
-	- use less "loc"
-	- numpy over pandas
-"""
-
-start_rating = 1500
-Sigma = 350
-c = 20
-
-Elo = Elo()
-Glicko = Glicko()
-
+'''
 
 class Rate(object):
-
 	"""
-	A python object to rank sports teams based on different rating systems e.g. Elo Ratings and Glicko Ratings
-
-		:param localteam_id: name of column for localteam id, defaults to 'localteam_id'
-		:param visitorteam_id: name of column for visitorteam id, defaults to 'visitorteam_id'
-		:param localteam_name: name of column for localteam name, defaults to 'localteam_name'
-		:param visitorteam_name: name of column for visitorteam name, defaults to 'visitorteam_name'
-		:param localteam_score: name of column for localteam score, defaults to 'localteam_score'
-		:param visitorteam_score: name of column for visitorteam score, defaults to 'visitorteam_score'
-		:param order: name of column used to sort fixtures, defaults to 'starting_datetime'
-		:param league: name of column used to identify league, defaults to 'league_name'
-		:param season: name of column used to identify season, defaults to 'season_name'
-
-		Resulting dataframes that can be accessed after calculate_elo is run:
-			ratings_fixures: ratings before and after each fixture for each team, as well as probability of each team winning
-			ratings_teams: most recent ratings for each team in the fixture list
-			ratings_teams_fixtures: ratings for each team fixture over time - can be used to plot trends
-			ratings_teams_seasons: ratings for each team in each season (only available when results_by_season is set to true)
-			true: match outcomes
-			pred: match predictions
-			true_classes: match outcomes, separated into different classes (created to handle ties)
-			pred_classes: match predictions, separated into different classes (created to handle ties)
-			cm: confusion matrix
-			c_report: classification report - includes precision, recall, f1-score and support
-			roc_auc: ROC AUC score
-			log_loss: log loss score
+		Class to apply ratings across a list of fixture dataset.
 	"""
-
-	def __init__(self,
-				localteam_id = 'localteam_id', visitorteam_id = 'visitorteam_id',
-				localteam_name = 'localteam_name', visitorteam_name = 'visitorteam_name',
-				localteam_score = 'localteam_score', visitorteam_score = 'visitorteam_score',
-				order = 'starting_datetime', league = 'league_name', season = 'season_name',
-				start_rating = 1500):
-
-		self.ratings_fixtures = pd.DataFrame()
-		self.ratings_teams = pd.DataFrame()
-		self.ratings_teams_fixtures = pd.DataFrame()
-		self.ratings_teams_seasons = pd.DataFrame()
-		self.localteam_id = localteam_id
-		self.visitorteam_id = visitorteam_id
-		self.localteam_name = localteam_name
-		self.visitorteam_name = visitorteam_name
-		self.localteam_score = localteam_score
-		self.visitorteam_score = visitorteam_score
-		self.order = order
-		self.league = league
-		self.season = season
-
-		self.progress = 0
-
-		self.start_rating = start_rating
-		self.Sigma = Sigma
-		self.c = c
-
-		self.ties_exist = True
-		#predictions in probabilites
-		self.true = np.empty([1, 1])
-		self.pred = np.empty([1, 1])
-		#predictions in classes (i.e. 1, 0)
-		self.true_classes = np.empty([1,1])
-		self.pred_classes = np.empty([1,1])
-
-		self.cm = np.empty([1,1])
-		self.c_report = ''
-		self.roc_auc = dict()
-		self.log_loss = 0
+	def __init__(self, fixtures, model, start_rating=1500, sigma=350, **kwgs):
+		self.fixtures = fixtures.sort_values('starting_datetime')\
+								.reset_index(drop=True)
+		self.sigma = sigma
+		self.model = model(sigma=sigma, **kwgs)
+		self.__init_ratings__(start_rating)
 
 
-	def _set_teams(self, data, rating_method):
+	def __init_ratings__(self, start_rating):
 		"""
-		Turn list of fixtures into teams, and set initial score
+			Initialize all ratings to start_rating
 		"""
-		teams_local = data[[self.localteam_id, self.localteam_name]] \
-					.drop_duplicates() \
-					.rename(columns={self.localteam_id: 'team_id', self.localteam_name: 'team_name'})
+		h = self.fixtures[['localteam_id']]\
+				.rename(columns={'localteam_id':'team_id'})
+		v = self.fixtures[['visitorteam_id']]\
+				.rename(columns={'visitorteam_id':'team_id'})
+		teams = pd.concat([h,v], axis=0, sort=False, ignore_index=True)\
+					.drop_duplicates()
+		teams['rating'] = start_rating
+		teams['rd'] = self.sigma
+		self.team_ratings = teams.set_index('team_id').to_dict()#['rating']
 
-		teams_visitor = data[[self.visitorteam_id, self.visitorteam_name]] \
-						.drop_duplicates() \
-						.rename(columns={self.visitorteam_id: 'team_id', self.visitorteam_name: 'team_name'})
-
-		teams = teams_local.append(teams_visitor, ignore_index = True).drop_duplicates()
-		teams['rating'] = self.start_rating
-
-		if rating_method == 'Glicko':
-			teams['RD'] = self.Sigma
-
-		teams.set_index('team_id', inplace = True)
-
-		return teams
+		return True
 
 
-	def _set_team_id(self, data):
-		"""
-		Set the team id if team id does not exist
-		"""
-		teams_local = data[[self.localteam_name]].drop_duplicates().rename(columns={self.localteam_name: 'team_name'})
-		teams_visitor = data[[self.visitorteam_name]].drop_duplicates().rename(columns={self.visitorteam_name: 'team_name'})
-		teams = teams_local.append(teams_visitor, ignore_index = True).drop_duplicates()
-		teams['team_id'] = teams.index.values
-
-		data = data.merge(teams, left_on = self.localteam_name,  right_on = 'team_name').rename(columns={'team_id': 'localteam_id'})
-		data = data.merge(teams, left_on = self.visitorteam_name, right_on = 'team_name').rename(columns={'team_id': 'visitorteam_id'})
-
-		self.localteam_id = 'localteam_id'
-		self.visitorteam_id = 'visitorteam_id'
-
-		return data
-
-
-	def _process_data(self, data):
-		"""
-		Process fixture data - order fixtures and assign outcomes
-		"""
-		# Determine outcome for each fixture
+	def _compute_outcomes(self):
 		conditions = [
-			data[self.localteam_score] > data[self.visitorteam_score],
-			data[self.visitorteam_score] > data[self.localteam_score],
-			data[self.localteam_score] == data[self.visitorteam_score]
+			self.fixtures['localteam_score']>self.fixtures['visitorteam_score'],
+			self.fixtures['visitorteam_score']>self.fixtures['localteam_score'],
+			self.fixtures['localteam_score']==self.fixtures['visitorteam_score']
 		]
 		choices = [ 1, 0, 0.5 ]
-		data['outcome'] = np.select(conditions, choices)
 
-		conditions = [
-			data[self.localteam_score] > data[self.visitorteam_score],
-			data[self.visitorteam_score] > data[self.localteam_score],
-			data[self.localteam_score] == data[self.visitorteam_score]
-		]
-		choices = [ 0, 1, 0.5 ]
-		data['visitorteam_outcome'] = np.select(conditions, choices)
+		self.fixtures['outcome'] = np.select(conditions, choices)
 
-		#Sort fixtures
-		data.sort_values(self.order, inplace = True)
+		### CALCULATING SCORE_DIFF AS A FUNCTION OF HOMETEAM
+		self.fixtures['score_diff'] = self.fixtures['localteam_score'] - \
+										self.fixtures['visitorteam_score']
 
-		if (self.localteam_id == '') | (self.visitorteam_id == '') :
-			data = self._set_team_id(data)
-
-		return data
+		return True
 
 
-	def calculate_tie_prob(self, s, p):
+	def _update_team_rating(self, team_id, rating):
+		self.team_ratings['rating'][team_id] = rating
+		return True
+
+
+	def _update_team_rd(self, team_id, rd):
+		self.team_ratings['rd'][team_id] = rd
+		return True
+
+	def _rate_match_glicko(self, row):
+		phome, pvis, hpost, vpost, h_rd_post, v_rd_post = self.model.rate(
+			self.hpre, self.vpre, self.outcome, self.h_rd_pre, self.v_rd_pre
+		)
+
+		self._update_team_rd(row['localteam_id'], h_rd_post)
+		self._update_team_rd(row['visitorteam_id'], v_rd_post)
+
+		self._update_team_rating(row['localteam_id'], hpost)
+		self._update_team_rating(row['visitorteam_id'], vpost)
+
+		return {
+			'hpre':self.hpre, 'vpre': self.vpre,
+			'h_rd_pre': self.h_rd_pre, 'v_rd_pre': self.v_rd_pre,
+			'phome': phome, 'pvis': pvis,
+			'hpost': hpost, 'vpost': vpost,
+			'h_rd_post': h_rd_post, 'v_rd_post': v_rd_post
+		}
+
+	def _rate_match_elo(self, row):
+		phome, pvis, hpost, vpost = self.model.rate(
+			self.hpre,self.vpre,outcome=self.outcome, score_diff=self.score_diff
+		)
+
+		self._update_team_rating(row['localteam_id'], hpost)
+		self._update_team_rating(row['visitorteam_id'], vpost)
+
+		return {
+			'hpre': self.hpre, 'vpre': self.vpre, 'phome': phome,
+			'pvis': pvis, 'hpost':hpost, 'vpost':vpost
+		}
+
+	def rate_match(self, row, use_rd=False):
 		"""
-		Calculate the win, loss, tie probabilities using actual outcomes and predicted home team probabilities
+		Params:
+			- row: matchup, or row of fixtures
+			- use_rd (default=False): whether to use ratings deviation (std.)
 		"""
-		#turning home, tie, away into three different columns
-		true_h = np.where(s==1, 1, 0)
-		true_a = np.where(s==0, 1, 0)
-		true_t = np.where(s==0.5, 1, 0)
+		self.hpre = self.team_ratings['rating'][row['localteam_id']]
+		self.vpre = self.team_ratings['rating'][row['visitorteam_id']]
+		self.h_rd_pre = self.team_ratings['rd'][row['localteam_id']]
+		self.v_rd_pre = self.team_ratings['rd'][row['visitorteam_id']]
+		self.outcome = row['outcome']
+		self.score_diff = row['score_diff']
 
-		nbins = 50
+		if use_rd:
+			return self._rate_match_glicko(row)
 
-		y_binned_h, x_bins_h = np.histogram(p, bins=nbins, weights=true_h)
-		y_total_h, x_bins_h = np.histogram(p, bins=nbins)
-
-		y_binned_a, x_bins_a = np.histogram(p, bins=nbins, weights=true_a)
-		y_total_a, x_bins_a = np.histogram(p, bins=nbins)
-
-		y_binned_t, x_bins_t = np.histogram(p, bins=nbins, weights=true_t)
-		y_total_t, x_bins_t = np.histogram(p, bins=nbins)
-
-		#excluding instances where the number of samples in the bin is less than 15
-		mask_h = y_total_h > 20
-		mask_a = y_total_a > 20
-		mask_t = y_total_t > 20
-
-		y_binned_h = y_binned_h[mask_h]
-		y_binned_a = y_binned_a[mask_a]
-		y_binned_t = y_binned_t[mask_t]
-
-		y_total_h = y_total_h[mask_h]
-		y_total_a = y_total_a[mask_a]
-		y_total_t = y_total_t[mask_t]
-
-		x_bins_h = x_bins_h[1:][mask_h]
-		x_bins_a = x_bins_a[1:][mask_a]
-		x_bins_t = x_bins_t[1:][mask_t]
-
-		mean_h = np.divide(y_binned_h, y_total_h)
-		mean_h[np.isnan(mean_h)]=0
-
-		mean_a = np.divide(y_binned_a, y_total_a)
-		mean_a[np.isnan(mean_a)]=0
-
-		mean_t = np.divide(y_binned_t, y_total_t)
-		mean_t[np.isnan(mean_t)]=0
-
-		#Calculate lines of best fit
-		z_h = np.polyfit(x_bins_h, mean_h, 2)
-		p_h = np.poly1d(z_h)
-
-		z_a = np.polyfit(x_bins_a, mean_a, 2)
-		p_a = np.poly1d(z_a)
-
-		z_t = np.polyfit(x_bins_t, mean_t, 2)
-		p_t = np.poly1d(z_t)
-
-		def three_way_probability(p):
-			p_tie =  p_t(p)
-			p_away =  p_a(p)
-			p_home = p_h(p)
-
-			return p_home, p_away, p_tie
-
-		p_home, p_away, p_tie = three_way_probability(p)
-
-		true = np.column_stack((true_h, true_a, true_t))
-		pred = np.column_stack((p_home, p_away, p_tie))
-
-		true_outcome = np.where(s == 0.5, 2, s)
-		vpredict_outcome = vectorize(self.predict_outcome)
-		pred_outcome = vpredict_outcome(p_home, p_away, p_tie)
-
-		self.true = true
-		self.pred = pred
-		self.true_classes = true_outcome
-		self.pred_classes = pred_outcome
-
-
-	def predict_outcome(self, p_home, p_away, p_tie, margin=0.1):
-		"""
-		Predict outcomes in order to generate confusion matrix and precision, recall, and f-1 score
-		"""
-		#Establish a margin where if probability of home and away winning are similar, then it's a tie
-		margin = margin
-		h_a_diff = np.abs(p_away - p_home)
-
-		#Using an integer to represent ties because evaluation functions require this
-		if (h_a_diff < margin) or (p_tie > p_home and p_tie > p_away):
-			return 2
-		elif p_home > p_away and p_home > p_tie:
-			return 1
 		else:
-			return 0
+			return self._rate_match_elo(row)
 
 
-	def evaluate_predictions(self):
-		self.get_confusion_matrix(graph=False)
-		self.get_classification_report()
-		self.get_roc(graph=False)
-		self.get_log_loss()
-
-
-	def get_confusion_matrix(self, graph=True):
+	def rate_fixtures(self, use_rd=False):
 		"""
-		Gets the confusion matrix and graph using current data
+		Rate all fixtures. Perhaps it could be done with a rolling function.
 		"""
-		cm = conf_matrix(self.true_classes, self.pred_classes)
+		self._compute_outcomes()
+		ratings = []
+		ratings = self.fixtures.apply(self.rate_match, args=(use_rd,), axis=1)
 
-		if graph == True:
-			graph_confusion_matrix(cm)
+		return self.fixtures.join(pd.DataFrame(ratings.values.tolist()))
 
-		self.cm = cm
+#         for i, row in self.fixtures.iterrows():
+#             ratings.append(self.rate_row(row, use_rd=use_rd))
 
-		return cm
-
-
-	def get_classification_report(self):
-		"""
-		Gets the classification report - print the result to see the formatted table
-		"""
-		c_report = classif_report(self.true_classes, self.pred_classes)
-		self.c_report = c_report
-
-		return c_report
-
-
-	def get_roc(self, graph=True):
-		"""
-		Gets the ROC AUC using current data
-		"""
-		roc_auc, fpr, tpr = roc_auc_s(self.true, self.pred)
-
-		n_classes = self.true.shape[1]
-
-		if graph == True:
-			graph_roc_auc(roc_auc, fpr, tpr, n_classes)
-
-		self.roc_auc = roc_auc
-
-		return roc_auc
-
-
-	def get_log_loss(self):
-		"""
-		Gets the log loss using current data
-		"""
-		len_s = len(self.true)
-		if self.ties_exist == True:
-			l_loss = mlog_loss(self.true, self.pred)
-			n_classes = self.true.shape[1]
-			bm_pred = np.empty([1, 1])
-			bm_arr = dict()
-			for i in range(n_classes):
-				mean = np.mean(self.true[:, i])
-				bm_arr[i] = np.full((len_s, ), mean, dtype=float)
-			bm_pred = np.column_stack(([bm_arr[i] for i in range(n_classes)]))
-			bm_l_loss = mlog_loss(self.true, bm_pred)
-		else:
-			l_loss = log_loss(self.true, self.pred)
-			mean_s = np.mean(self.true)
-			bm_arr = np.full((len_s, ), mean_s, dtype=float)
-			bm_l_loss = log_loss(self.true, bm_arr)
-
-		self.log_loss = l_loss
-		self.bm_log_loss = bm_l_loss
-
-		return l_loss, bm_l_loss
-
-
-	def calculate_elo(self, data, K, h=0, Sd=False, Sd_method='Logistic', m=1,
-						results_by_league=False, results_by_season=False,
-						rt_mean=False, rt_mean_amnt=1/3, time_scale=False,
-						time_scale_factor=2, start_rating=None,
-						tie_probability=True):
-		"""
-		Calculate elo rating for fixtures, accepts a dataframe
-
-		:param K: constant used to gauge magnitude of effect for each match outcome
-		:param h: home-team advantage, defaults to 0
-		:param Sd: either True or False - takes into account score difference when set to True
-		:param Sd_method: method used to account for score difference, options are 'Logistic', 'Constant', or 'Five_thirty_eight', defaults to 'Logistic'
-		:param m: multiplier for score difference - defaults to 0, is not used with 'Five_thirty_eight' method
-		:param results_by_league: calculate ratings for each league individually, defaults to False
-		:param results_per_season: calculate ratings for each season individually, defaults to False
-		:param rt_mean: regress ratings to league mean after each season, defaults to False
-		:param rt_mean_degree: amount to regress to mean, defaults to 1/3
-		:param tie_probability: recommended to be left to 'True' - calculates tie probability when there are tie outcomes
-
-		Note that if results_by_league is False and results_by_season is True, only one league should be passed as data
-		"""
-
-		self.ratings_fixtures = pd.DataFrame()
-		self.ratings_teams = pd.DataFrame()
-		self.ratings_teams_fixtures = pd.DataFrame()
-		self.ratings_teams_seasons = pd.DataFrame()
-		self.progress = 0
-
-		start = time()
-
-		self.start_rating = start_rating or self.start_rating
-
-		print ('Prepping data...')
-		data = self._process_data(data)
-
-		print ('Starting calculations...')
-		self.total = len(data.index)
-
-		if results_by_league == False and results_by_season == False:
-
-			ratings_teams = self._set_ratings_elo(data=data, K=K, h=h, Sd=Sd, Sd_method=Sd_method, m=m, time_scale=time_scale, time_scale_factor=time_scale_factor)
-			ratings_teams.sort_values('rating', ascending = False, inplace = True)
-			self.ratings_teams = ratings_teams
-
-		elif results_by_league == True and results_by_season == False:
-
-			leagues = data[self.league].unique()
-			league_team_r = pd.DataFrame()
-
-			for league in leagues:
-				league_subset = data[data[self.league] == league]
-				league_subset_r = self._set_ratings_elo(league_subset, K, h=h, Sd=Sd, Sd_method=Sd_method, m=m, time_scale=time_scale, time_scale_factor=time_scale_factor)
-				league_subset_r[self.league] = league
-				league_team_r = league_team_r.append(league_subset_r)
-
-			league_team_r.sort_values([self.league, 'rating'], ascending = False, inplace = True)
-			self.ratings_teams = league_team_r
-
-		elif results_by_league == False and results_by_season == True:
-			print('Results being calculated by season, please make sure that only one league is passed in the data. \nIf you would like to pass multiple leagues, please set "results_by_league to True')
-
-			seasons = data[self.season].unique()
-			season_team_r = pd.DataFrame()
-			team_r = self._set_teams(data, rating_method='Elo')
-
-			for season in seasons:
-
-				#turn original team ratings into preseason ratings
-				team_r_pre = team_r.rename(columns={'rating': 'rating_preseason'}).drop('team_name', axis= 1)
-
-				#get team ratings post season
-				season_subset_r = self._set_ratings_elo(data[data[self.season] == season], K, h=h, Sd=Sd, Sd_method=Sd_method,
-													m=m, prev_ratings=team_r, time_scale=time_scale, time_scale_factor=time_scale_factor)
-
-				#update team ratings
-				if rt_mean == True:
-					ratings = season_subset_r['rating'].values.copy()
-					season_avg = np.mean(ratings)
-					season_subset_r['rating'] = ratings + (season_avg - ratings) * rt_mean_amnt
-					team_r = team_r.combine_first(season_subset_r)
-					season_subset_r['o_rating_postseason'] = ratings
-				else:
-					team_r = team_r.combine_first(season_subset_r)
-
-				#join preseason to post season ratings
-				season_subset_r = season_subset_r.join(team_r_pre).rename(columns={'rating': 'rating_postseason'})
-
-				#add season to pre and post season ratings
-				season_subset_r[self.season] = season
-				season_team_r = season_team_r.append(season_subset_r)
-
-			season_team_r.sort_values([self.season, 'rating_postseason'], ascending = False, inplace = True)
-			self.ratings_teams = team_r.sort_values('rating', ascending = False)
-			self.ratings_teams_seasons = season_team_r
-
-		elif results_by_league == True and results_by_season == True:
-
-			leagues = data[self.league].unique()
-			league_team_season_r = pd.DataFrame()
-
-			for league in leagues:
-				league_subset = data[data[self.league] == league]
-				seasons = league_subset[self.season].unique()
-
-				season_team_r = pd.DataFrame()
-				team_r = self._set_teams(league_subset, rating_method='Elo')
-
-				for season in seasons:
-
-					#turn original team ratings into preseason ratings
-					team_r_pre = team_r.rename(columns={'rating': 'rating_preseason'}).drop('team_name', axis= 1)
-
-					#get team ratings post season
-					season_subset_r = self._set_ratings_elo(data[data[self.season] == season], K, h=h, Sd=Sd,
-														Sd_method=Sd_method, m=m, prev_ratings=team_r, time_scale=time_scale, time_scale_factor=time_scale_factor)
-
-					#update team ratings
-					team_r = team_r.update(season_subset_r)
-
-					#join preseason to post season ratings
-					season_subset_r = season_subset_r.join(team_r_pre).rename(columns={'rating': 'rating_postseason'})
-
-					#add season to pre and post season ratings
-					season_subset_r[self.season] = season
-					season_team_r = season_team_r.append(season_subset_r)
-
-				season_team_r[self.league] = league
-				league_team_season_r = league_team_season_r.append(season_team_r)
-
-			self.ratings_teams = league_team_season_r.sort_values([self.league, 'rating'], ascending = False)
-
-		"""
-		#calculate log loss of the predictions
-		s = data['outcome'].values
-		p = self.ratings_fixtures['localteam_p'].values
-
-		l_loss = log_loss(s, p)
-		sq_err = squared_error(s, p)
-
-		self.log_loss = l_loss
-		self.squared_error = sq_err
-
-		p_tie = np.full((self.total, ), 0.5, dtype=float)
-		l_loss_tie = log_loss(s, p_tie)
-		sq_err_tie = squared_error(s, p_tie)
-		self.log_loss_tie = l_loss_tie
-		self.squared_error_tie = sq_err_tie
-
-		p_home = np.full((self.total, ), 0.999, dtype=float)
-		l_loss_home = log_loss(s, p_home)
-		sq_err_home = squared_error(s, p_home)
-		self.log_loss_home = l_loss_home
-		self.squared_error_tie = sq_err_home
-		"""
-		s = data['outcome'].values
-		p = self.ratings_fixtures['localteam_p'].values
-		ties_exist = ((s == 0.5).sum) != 0
-
-		if ties_exist:
-			self.ties_exist = True
-		else:
-			self.ties_exist = False
-			self.true = s
-			self.pred = p
-			self.true_classes = s
-			self.pred_classes = np.where(p > 0.5, 1, 0)
-
-		if tie_probability == True and ties_exist:
-			self.calculate_tie_prob(s, p)
-
-		# self.evaluate_predictions()
-
-		end = time()
-
-		progress(100, 100, status="Hooray!")
-		print ('Calculations completed in %f seconds' % (end-start))
-
-
-	def _set_ratings_elo(self, data, K, h=0, Sd=False, Sd_method='Logistic', m=1, prev_ratings=None, time_scale=False, time_scale_factor=2):
-		"""
-		Calculates elo rating for every row of fixture data passed
-		"""
-
-		if prev_ratings is None:
-			teams = self._set_teams(data, rating_method='Elo')
-		else:
-			teams = prev_ratings
-
-		if Sd == False:
-			ratings_function = 'Elo.elo_rating(localteam_r, visitorteam_r, K, outcome, start_rating=self.start_rating, score_diff=0, h=h)'
-		else:
-			ratings_function = 'Elo.elo_rating(localteam_r, visitorteam_r, K, outcome, score_diff=score_diff, start_rating=self.start_rating, Sd_method=Sd_method, m=m, h=h)'
-
-		"""
-		#get location of columns
-		index_loc = 0
-		order_loc = data.columns.get_loc(self.order)
-		localteam_id_loc = data.columns.get_loc(self.localteam_id)
-		visitorteam_id_loc = data.columns.get_loc(self.visitorteam_id)
-		localteam_name_loc = data.columns.get_loc(self.localteam_name)
-		visitorteam_name_loc = data.columns.get_loc(self.visitorteam_name)
-		outcome_loc = data.columns.get_loc("outcome")
-		visitorteam_outcome_loc = data.columns.get_loc("visitorteam_outcome")
-		localteam_r_loc = data.columns.get_loc(self.localteam_r)
-		visitorteam_r_loc = data.columns.get_loc(self.visitorteam_r)
-		"""
-		recarray = data.to_records(index=True)
-		fixture_ratings = dict()
-		new_local_ratings = dict()
-		new_visitor_ratings = dict()
-
-		for row in recarray:
-
-			self.progress += 1
-			progress(self.progress, self.total, status=row[0])
-
-			index = row[0]
-			order = getattr(row, self.order)
-			localteam_id = getattr(row, self.localteam_id)
-			visitorteam_id = getattr(row, self.visitorteam_id)
-			localteam_name = getattr(row, self.localteam_name)
-			visitorteam_name = getattr(row, self.visitorteam_name)
-			outcome = row.outcome
-			visitorteam_outcome = row.visitorteam_outcome
-			localteam_r = teams.loc[localteam_id]['rating']
-			visitorteam_r = teams.loc[visitorteam_id]['rating']
-			score_diff = np.abs(getattr(row, self.localteam_score) - getattr(row, self.visitorteam_score))
-
-			#calculate ratings
-			localteam_p, visitorteam_p, localteam_post_r, visitorteam_post_r = eval(ratings_function)
-
-			#assign probabilities for current game and post-game ratings
-			fixture_ratings[index] = { 'result_order': order,
-									   'localteam_r': localteam_r,
-									  'visitorteam_r': visitorteam_r,
-									  'localteam_p': localteam_p,
-									  'visitorteam_p': visitorteam_p,
-									  'localteam_post_r': localteam_post_r,
-									  'visitorteam_post_r': visitorteam_post_r}
-
-			#update team rating without time scaling
-			if time_scale == False:
-				teams.loc[localteam_id, 'rating'] = localteam_post_r
-				teams.loc[visitorteam_id, 'rating'] = visitorteam_post_r
-
-				#assign probabilities for each team over time
-				new_local_ratings[index] = {'id': index,
-									'order': order,
-									'position': 'local',
-									'team_id': localteam_id,
-									'team_name': localteam_name,
-									'team_r': localteam_r,
-									'team_p': localteam_p,
-									'outcome': outcome,
-									'team_post_r': localteam_post_r}
-				new_visitor_ratings[index] = {'id': index,
-										'order': order,
-										'position': 'visitor',
-										'team_id': visitorteam_id,
-										'team_name': visitorteam_name,
-										'team_r': visitorteam_r,
-										'team_p': visitorteam_p,
-										'outcome': visitorteam_outcome,
-										'team_post_r': visitorteam_post_r}
-
-			#update team rating with time scaling
-			elif time_scale == True:
-
-				if (len(self.ratings_teams_fixtures.index) > 0):
-
-					lteam_fixtures = self.ratings_teams_fixtures[self.ratings_teams_fixtures['team_id'] == localteam_id]
-					vteam_fixtures = self.ratings_teams_fixtures[self.ratings_teams_fixtures['team_id'] == visitorteam_id]
-
-					if (len(lteam_fixtures.index) > 0):
-						lteam_r_chng = lteam_fixtures['team_post_r'].values - lteam_fixtures['team_r'].values
-						lteam_r_chng_append = localteam_post_r - localteam_r
-						lteam_r_chng = np.append(lteam_r_chng, lteam_r_chng_append)
-
-						lteam_r_chng_current = Elo._weighted_r_diff(lteam_r_chng, time_scale_factor)
-						teams.loc[localteam_id, 'rating'] = self.start_rating + lteam_r_chng_current
-						lteam_post_r_ts = self.start_rating + lteam_r_chng_current
-
-					if (len(vteam_fixtures.index) > 0):
-						vteam_r_chng = vteam_fixtures['team_post_r'].values - vteam_fixtures['team_r'].values
-						vteam_r_chng_append = visitorteam_post_r - visitorteam_r
-						vteam_r_chng = np.append(vteam_r_chng, vteam_r_chng_append)
-
-						vteam_r_chng_current = Elo._weighted_r_diff(vteam_r_chng, time_scale_factor)
-						teams.loc[visitorteam_id, 'rating'] = self.start_rating + vteam_r_chng_current
-						vteam_post_r_ts = self.start_rating + vteam_r_chng_current
-
-					if (len(lteam_fixtures.index) == 0):
-						teams.loc[localteam_id, 'rating'] = localteam_post_r
-						lteam_post_r_ts = localteam_post_r
-
-					if (len(vteam_fixtures.index) == 0):
-						teams.loc[visitorteam_id, 'rating'] = visitorteam_post_r
-						vteam_post_r_ts = visitorteam_post_r
-
-				else:
-					teams.loc[localteam_id, 'rating'] = localteam_post_r
-					lteam_post_r_ts = localteam_post_r
-					teams.loc[visitorteam_id, 'rating'] = visitorteam_post_r
-					vteam_post_r_ts = visitorteam_post_r
-
-				#assign probabilities for each team over time
-				new_local_ratings[index] = {'id': index,
-									'order': order,
-									'position': 'local',
-									'team_id': localteam_id,
-									'team_name': localteam_name,
-									'team_r': localteam_r,
-									'team_p': localteam_p,
-									'outcome': outcome,
-									'team_post_r': localteam_post_r,
-									'team_post_r_ts': lteam_post_r_ts}
-				new_visitor_ratings[index] = {'id': index,
-										'order': order,
-										'position': 'visitor',
-										'team_id': visitorteam_id,
-										'team_name': visitorteam_name,
-										'team_r': visitorteam_r,
-										'team_p': visitorteam_p,
-										'outcome': visitorteam_outcome,
-										'team_post_r': visitorteam_post_r,
-										'team_post_r_ts': vteam_post_r_ts}
-
-		self.ratings_fixtures = self.ratings_fixtures.append(pd.DataFrame.from_dict(fixture_ratings, orient='index'), ignore_index = False).sort_values('result_order')
-		self.ratings_teams_fixtures = self.ratings_teams_fixtures.append(pd.DataFrame.from_dict(new_local_ratings, orient='index'), ignore_index = True)
-		self.ratings_teams_fixtures = self.ratings_teams_fixtures.append(pd.DataFrame.from_dict(new_visitor_ratings, orient='index'), ignore_index = True)
-
-		return teams
-
-
-	def calculate_glicko(self, data, c=c, start_rating=None, Sigma=Sigma, h=0,
-						 results_by_league=False, results_by_season=False, tie_probability=True):
-		"""
-		Calculate Glicko rating for fixtures, accepts a dataframe
-
-		:param c: determines how much RD goes back up between periods of assessment, defaults to 20
-		:param start_rating: determines where the ratings start, defaults to 1500
-		:param Sigma: the start RD for every team, defaults to 350
-		:param results_by_league: calculate ratings for each league individually, defaults to False
-		:param results_per_season: calculate ratings for each season individually, defaults to False
-		:param tie_probability: recommended to be left to 'True' - calculates tie probability when there are tie outcomes
-
-		Note that if results_by_league is False and results_by_season is True, only one league should be passed as data
-		"""
-		self.start_rating = start_rating or self.start_rating
-
-		self.ratings_fixtures = pd.DataFrame()
-		self.ratings_teams_fixtures = pd.DataFrame()
-		self.ratings_teams_seasons = pd.DataFrame()
-		self.progress = 0
-
-		if Sigma != self.Sigma:
-			self.Sigma = Sigma
-
-		if c != self.c:
-			self.c = c
-
-		start = time()
-
-		print ('Prepping data...')
-		data = self._process_data(data)
-
-		print ('Starting calculations...')
-		self.total = len(data.index)
-
-		if results_by_league == False and results_by_season == False:
-
-			ratings_teams = self._set_ratings_glicko(data, h=h)
-			ratings_teams.sort_values('rating', ascending = False, inplace = True)
-			self.ratings_teams = ratings_teams
-
-		elif results_by_league == True and results_by_season == False:
-
-			leagues = data[self.league].unique()
-			league_team_r = pd.DataFrame()
-
-			for league in leagues:
-				league_subset = data[data[self.league] == league]
-				league_subset_r = self._set_ratings_glicko(data, h=h)
-				league_subset_r[self.league] = league
-				league_team_r = league_team_r.append(league_subset_r)
-
-			league_team_r.sort_values([self.league, 'rating'], ascending = False, inplace = True)
-			self.ratings_teams = league_team_r
-
-		elif results_by_league == False and results_by_season == True:
-			print('Results being calculated by season, please make sure that only one league is passed in the data. If you would like to pass multiple leagues, please set "results_by_league to True')
-
-			seasons = data[self.season].unique()
-			season_team_r = pd.DataFrame()
-			team_r = self._set_teams(data, rating_method='Glicko')
-
-			for season in seasons:
-
-				#turn original team ratings into preseason ratings
-				team_r_pre = team_r.rename(columns={'rating': 'rating_preseason'}).drop('team_name', axis= 1)
-
-				#get team ratings post season
-				season_subset_r = self._set_ratings_glicko(data[data[self.season] == season], prev_ratings=team_r, h=h)
-
-				#update team ratings
-				team_r = team_r.combine_first(season_subset_r)
-
-				#join preseason to post season ratings
-				season_subset_r = season_subset_r.join(team_r_pre).rename(columns={'rating': 'rating_postseason'})
-
-				#add season to pre and post season ratings
-				season_subset_r[self.season] = season
-				season_team_r = season_team_r.append(season_subset_r)
-
-			season_team_r.sort_values([self.season, 'rating_postseason'], ascending = False, inplace = True)
-			self.ratings_teams = team_r.sort_values('rating', ascending = False)
-			self.ratings_teams_seasons = season_team_r
-
-		elif results_by_league == True and results_by_season == True:
-
-			leagues = data[self.league].unique()
-			league_team_season_r = pd.DataFrame()
-
-			for league in leagues:
-				league_subset = data[data[self.league] == league]
-				seasons = league_subset[self.season].unique()
-
-				season_team_r = pd.DataFrame()
-				team_r = self._set_teams(league_subset, rating_method='Glicko')
-
-				for season in seasons:
-
-					#turn original team ratings into preseason ratings
-					team_r_pre = team_r.rename(columns={'rating': 'rating_preseason'}).drop('team_name', axis= 1)
-
-					#get team ratings post season
-					season_subset_r = self._set_ratings_glicko(data[data[self.season] == season], prev_ratings=team_r, h=h)
-
-					#update team ratings
-					team_r = team_r.update(season_subset_r)
-
-					#join preseason to post season ratings
-					season_subset_r = season_subset_r.join(team_r_pre).rename(columns={'rating': 'rating_postseason'})
-
-					#add season to pre and post season ratings
-					season_subset_r[self.season] = season
-					season_team_r = season_team_r.append(season_subset_r)
-
-				season_team_r[self.league] = league
-				league_team_season_r = league_team_season_r.append(season_team_r)
-
-			self.ratings_teams = league_team_season_r.sort_values([self.league, 'rating'], ascending = False)
-
-		#calculate log loss of the predictions
-		"""
-		l_loss = log_loss(s, p)
-		sq_err = squared_error(s, p)
-
-		self.log_loss = l_loss
-		self.squared_error = sq_err
-
-		p_tie = np.full((self.total, ), 0.5, dtype=float)
-		l_loss_tie = log_loss(s, p_tie)
-		sq_err_tie = squared_error(s, p_tie)
-		self.log_loss_tie = l_loss_tie
-		self.squared_error_tie = sq_err_tie
-
-		p_home = np.full((self.total, ), 0.999, dtype=float)
-		l_loss_home = log_loss(s, p_home)
-		sq_err_home = squared_error(s, p_home)
-		self.log_loss_home = l_loss_home
-		self.squared_error_tie = sq_err_home
-		"""
-
-		s = data['outcome'].values
-		p = self.ratings_fixtures['localteam_p'].values
-		ties_exist = ((s == 0.5).sum) != 0
-
-		if ties_exist:
-			self.ties_exist = True
-		else:
-			self.ties_exist = False
-			self.true = s
-			self.pred = p
-			self.true_classes = s
-			self.pred_classes = np.where(p > 0.5, 1, 0)
-
-		if tie_probability == True and ties_exist:
-			self.calculate_tie_prob(s, p)
-
-		self.evaluate_predictions()
-
-		end = time()
-
-		progress(100, 100, status="Hooray!")
-		print ('Calculations completed in %f seconds' % (end-start))
-
-
-	def _set_ratings_glicko(self, data, prev_ratings=None, h=0):
-
-		#Glicko = Glicko(c=c, start_rating=start_rating, Sigma=Sigma)
-
-		if prev_ratings is None:
-			teams = self._set_teams(data, rating_method='Glicko')
-		else:
-			teams = prev_ratings
-
-		recarray = data.to_records(index=True)
-		fixture_ratings = dict()
-		new_local_ratings = dict()
-		new_visitor_ratings = dict()
-
-		for row in recarray:
-
-			self.progress += 1
-			progress(self.progress, self.total, status=row.Index)
-
-			index = row[0]
-			order = getattr(row, self.order)
-			localteam_id = getattr(row, self.localteam_id)
-			visitorteam_id = getattr(row, self.visitorteam_id)
-			localteam_name = getattr(row, self.localteam_name)
-			visitorteam_name = getattr(row, self.visitorteam_name)
-			outcome = row.outcome
-			visitorteam_outcome = row.visitorteam_outcome
-			localteam_r = teams.loc[localteam_id]['rating']
-			visitorteam_r = teams.loc[visitorteam_id]['rating']
-			localteam_RD = teams.loc[localteam_id]['RD']
-			visitorteam_RD = teams.loc[visitorteam_id]['RD']
-
-			#calculate ratings
-			localteam_p, visitorteam_p, localteam_post_r, \
-			visitorteam_post_r, localteam_post_RD, visitorteam_post_RD = Glicko.glicko_rating(localteam_r, visitorteam_r,
-																							  localteam_RD, visitorteam_RD, outcome,
-																							  start_rating=self.start_rating, Sigma=self.Sigma, c=self.c, h=h)
-
-			#assign probabilities for current game and post-game ratings
-			fixture_ratings[index] = {'localteam_r': localteam_r,
-											  'visitorteam_r': visitorteam_r,
-											  'localteam_RD': localteam_RD,
-											  'visitorteam_RD': visitorteam_RD,
-											  'localteam_p': localteam_p,
-											  'visitorteam_p': visitorteam_p,
-											  'localteam_post_r': localteam_post_r,
-											  'visitorteam_post_r': visitorteam_post_r,
-											  'localteam_post_RD': localteam_post_RD,
-											  'visitorteam_post_RD': visitorteam_post_RD}
-
-			#assign probabilities for each team over time
-			new_local_ratings[index] = {'id': index,
-								'order': order,
-								'position': 'local',
-								'team_id': localteam_id,
-								'team_name': localteam_name,
-								'team_r': localteam_r,
-								'team_RD': localteam_RD,
-								'team_p': localteam_p,
-								'outcome': outcome,
-								'team_post_r': localteam_post_r,
-								'team_post_RD': localteam_post_RD}
-			new_visitor_ratings[index] = {'id': index,
-									'order': order,
-									'position': 'visitor',
-									'team_id': visitorteam_id,
-									'team_name': visitorteam_name,
-									'team_r': visitorteam_r,
-									'team_RD': visitorteam_RD,
-									'team_p': visitorteam_p,
-									'outcome': visitorteam_outcome,
-									'team_post_r': visitorteam_post_r,
-									'team_post_RD': visitorteam_post_RD}
-
-			teams.loc[localteam_id, 'rating'] = localteam_post_r
-			teams.loc[visitorteam_id, 'rating'] = visitorteam_post_r
-			teams.loc[localteam_id, 'RD'] = localteam_post_RD
-			teams.loc[visitorteam_id, 'RD'] = visitorteam_post_RD
-
-		self.ratings_fixtures = self.ratings_fixtures.append(pd.DataFrame.from_dict(fixture_ratings, orient='index'), ignore_index = False).sort_values('result_order')
-		self.ratings_teams_fixtures = self.ratings_teams_fixtures.append(pd.DataFrame.from_dict(new_local_ratings, orient='index'), ignore_index = True)
-		self.ratings_teams_fixtures = self.ratings_teams_fixtures.append(pd.DataFrame.from_dict(new_visitor_ratings, orient='index'), ignore_index = True)
-
-		return teams
+#         return self.fixtures.join(pd.DataFrame(ratings))

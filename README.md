@@ -19,7 +19,6 @@ elo = Elo(h=70)
 glicko = Glicko(c=42.43, sigma_min=30)
 ```
 
-
 ## Motivation
 
 ## Thoughts

@@ -17,7 +17,7 @@ class Elo(object):
 
 	"""
 
-	def __init__(self, start_rating=1500, sd_method='logistic', h=0, m=1, width=400, K=20):
+	def __init__(self, start_rating=1500, sd_method='logistic', h=0, m=1, width=400, K=20, **kwargs):
 		"""
 		Params:
 		-------
@@ -65,10 +65,15 @@ class Elo(object):
 		self.home_post = self.home_prev + self.K * self.sd * (hfactor - self.p_home)
 		self.vis_post = self.vis_prev + self.K * self.sd * (vfactor - self.p_vis)
 
+		self.returns = [
+			'phome','pvis',
+			'hpost','vpost'
+		]
+
 		return self.p_home, self.p_vis, self.home_post, self.vis_post
 
 
-	def elo_rating(self, home_prev, vis_prev, d, score_diff=0):
+	def rate(self, home_prev, vis_prev, outcome, score_diff=0):
 		"""
 		Elo rating calculation.
 
@@ -82,7 +87,7 @@ class Elo(object):
 		"""
 		self.home_prev = home_prev
 		self.vis_prev = vis_prev
-		self.d = d
+		self.d = outcome
 		self.score_diff = score_diff
 		# Calculate winning probabilities
 
@@ -94,13 +99,53 @@ class Elo(object):
 
 	def _weighted_r_diff(self, r_chng, a):
 		"""
-		Determine time-weighted rating change
+		It returns the ratings change for the current matchup based on the
+		history of rating change since beginning of period. So the new rating
+		will add this change to <start_rating> to know the current rating.
+		The r_chng vector includes the current matchup change. It seems to
+		smoothen the ratings changes up until now.
+
+		Note:
+			- Perhaps this should be moved to the rate function as it is only
+		applicable for multiple observations;
+
+		Parameters:
+		-----------
+			- r_chng (vector / list / array): ratings changes over time
+			- a (float): time_scale_factor
+		Return:
+		-------
+			- ratings change (float)
 		"""
 		length = len(r_chng)
 		ordered_arr = np.arange(1, length +1)
+
 		weights = np.power(((1 + ordered_arr - 1) / (1 + length - 1)), a)
+		# print (weights)
 
 		return np.sum(weights * r_chng)
+
+
+	def _ewma(r_chng, alpha):
+		'''
+		Calculates the exponential moving average over a vector.
+		Params:
+		-------
+			- r_chng: historical change in ratings
+			- alpha: The alpha parameter for the moving average (0,1)
+		'''
+		alpha = np.array(alpha, copy=False)
+		scaling_factors = np.power(1. - alpha, np.arange(r_chng.size + 1))
+
+		# create cumulative sum array
+		res = np.multiply(r_chng,(alpha*scaling_factors[-2])/scaling_factors[:-1])
+
+		# print (res)
+		res = np.cumsum(res)
+		# cumsums / scaling
+		res /= scaling_factors[-2::-1]
+
+		return res
 
 
 	def _score_diff_logistic(self):
