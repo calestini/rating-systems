@@ -12,6 +12,7 @@ class Glicko(object):
 	For more information on GLicko ratings:
 		- http://www.glicko.net/glicko/glicko.pdf
 		- https://en.wikipedia.org/wiki/Glicko_rating_system
+		- http://bjcox.com/downloads/glicko.pdf
 
 	"""
 
@@ -25,6 +26,7 @@ class Glicko(object):
 			- start_rating: determines where the ratings start, defaults to 1500
 			- sigma: the start RD for every team, defaults to 350
 		"""
+		self.__modelname__ = 'glicko'
 		self.start_rating = start_rating
 		self.sigma = sigma
 		self.sigma_min = sigma_min
@@ -59,7 +61,7 @@ class Glicko(object):
 				* np.power(self.q, 2) * np.power(rd, 2)) / np.power(np.pi, 2))
 
 
-	def probability(self, g, ra, rb):
+	def probability(self,g,  ra, rb):
 		"""
 		Calculate expected result
 		"""
@@ -121,3 +123,22 @@ class Glicko(object):
 			'h_rd_new','v_rd_new'
 		]
 		return E_home, E_vis, home_post, vis_post, rd_home_new, rd_vis_new
+
+
+	def predict_prob(self, r_home, r_vis, rd_home=None, rd_vis=None):
+		"""
+		Returns the probability prediction
+		"""
+		### HOME
+		onsetrd = self.onset_rd(rd_home, 1)
+		g = self.g(onsetrd)
+		# logging.warning(f'G: {g}')
+		E_home = self.probability(g, r_home, r_vis)
+
+		### VIS
+		onsetrd = self.onset_rd(rd_vis, 1)
+		g = self.g(onsetrd)
+		# logging.warning(f'G: {g}')
+		E_vis = self.probability(g, r_vis, r_home)
+
+		return E_home, E_vis

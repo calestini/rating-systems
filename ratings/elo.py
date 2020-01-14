@@ -30,6 +30,7 @@ class Elo(object):
 			- K (float): constant used to gauge magnitude of effect for each
 						match outcome
 		"""
+		self.__modelname__ = 'elo'
 		self.start_rating = start_rating
 		self.sd_method = sd_method
 		self.h = h
@@ -53,7 +54,7 @@ class Elo(object):
 		p1_w = 1.0 * 1.0 / \
 			(1 + 1.0 * math.pow(10,1.0*(rating2-(rating1 + self.h))/self.width))
 
-		return p1_w, 1 - p1_w
+		return p1_w, 1.0 - p1_w
 
 	def update_elo(self):
 
@@ -180,3 +181,10 @@ class Elo(object):
 		"""
 		self.sd =  np.power((1 + self.score_diff), self.m)
 		return self.sd
+
+
+	def predict_prob(self, r_home, r_vis):
+		"""
+		Returns the probability prediction
+		"""
+		return self.probability(r_home, r_vis) ## home_p, vis_p

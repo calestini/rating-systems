@@ -6,6 +6,7 @@ TODO:
 	- Add weight decay to Elo ratings;
 	- Add possibility of multiple seasons (not leagues.);
 	- Maybe make sigma part of kwargs, and handle within Glicko model obj;
+	- Add split in finished / unfinished for prediction purposes
 
 '''
 
@@ -14,8 +15,15 @@ class Rate(object):
 		Class to apply ratings across a list of fixture dataset.
 	"""
 	def __init__(self, fixtures, model, start_rating=1500, sigma=350, **kwgs):
-		self.fixtures = fixtures.sort_values('starting_datetime')\
-								.reset_index(drop=True)
+
+		### dataset used for prediction
+		self.prediction = fixtures[fixtures['has_finished']==False]\
+				.sort_values('starting_datetime').reset_index(drop=True)
+
+		### dataset used for historical assessment / regression
+		self.fixtures = fixtures[fixtures['has_finished']==True]\
+				.sort_values('starting_datetime').reset_index(drop=True)
+
 		self.sigma = sigma
 		self.model = model(sigma=sigma, **kwgs)
 		self.__init_ratings__(start_rating)
@@ -64,6 +72,7 @@ class Rate(object):
 		self.team_ratings['rd'][team_id] = rd
 		return True
 
+
 	def _rate_match_glicko(self, row):
 		phome, pvis, hpost, vpost, h_rd_post, v_rd_post = self.model.rate(
 			self.hpre, self.vpre, self.outcome, self.h_rd_pre, self.v_rd_pre
@@ -83,6 +92,7 @@ class Rate(object):
 			'h_rd_post': h_rd_post, 'v_rd_post': v_rd_post
 		}
 
+
 	def _rate_match_elo(self, row):
 		phome, pvis, hpost, vpost = self.model.rate(
 			self.hpre,self.vpre,outcome=self.outcome, score_diff=self.score_diff
@@ -96,7 +106,8 @@ class Rate(object):
 			'pvis': pvis, 'hpost':hpost, 'vpost':vpost
 		}
 
-	def rate_match(self, row, use_rd=False):
+
+	def rate_match(self, row):
 		"""
 		Params:
 			- row: matchup, or row of fixtures
@@ -109,11 +120,7 @@ class Rate(object):
 		self.outcome = row['outcome']
 		self.score_diff = row['score_diff']
 
-		if use_rd:
-			return self._rate_match_glicko(row)
-
-		else:
-			return self._rate_match_elo(row)
+		return getattr(self, f'_rate_match_{self.model.__modelname__}')(row)
 
 
 	def rate_fixtures(self, use_rd=False):
@@ -122,11 +129,27 @@ class Rate(object):
 		"""
 		self._compute_outcomes()
 		ratings = []
-		ratings = self.fixtures.apply(self.rate_match, args=(use_rd,), axis=1)
+		ratings = self.fixtures.apply(self.rate_match, axis=1)
 
 		return self.fixtures.join(pd.DataFrame(ratings.values.tolist()))
 
-#         for i, row in self.fixtures.iterrows():
-#             ratings.append(self.rate_row(row, use_rd=use_rd))
 
-#         return self.fixtures.join(pd.DataFrame(ratings))
+	def _predict_prob_elo(self, team1, team2):
+		return self.model.predict_prob(
+			self.team_ratings['rating'][team1],
+			self.team_ratings['rating'][team2],
+		)
+
+	def _predict_prob_glicko(self, team1, team2):
+		return self.model.predict_prob(
+			self.team_ratings['rating'][team1],
+			self.team_ratings['rating'][team2],
+			self.team_ratings['rd'][team1],
+			self.team_ratings['rd'][team2]
+		)
+
+	def predict_prob(self, team1, team2):
+		"""
+		Return the predicted probability of a match-up.
+		"""
+		return getattr(self, f'_predict_prob_{self.model.__modelname__}')(team1, team2)
