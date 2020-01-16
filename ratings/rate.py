@@ -2,11 +2,12 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import scipy.stats as stats
+from sklearn import metrics
 '''
 TODO:
 
 	- Add weight decay to Elo ratings;
-	- Add possibility of multiple seasons (not leagues.);
+	- Regress to the mean at the end of a season
 	- Maybe make sigma part of kwargs, and handle within Glicko model obj;
 
 '''
@@ -14,9 +15,23 @@ TODO:
 class Rate(object):
 	"""
 		Class to apply ratings across a list of fixture dataset.
+
+	Example
+	-------
+	>>> elo = Rate(fixtures, model=Elo, season_regress=0.33)
+	>>> elo.rate_fixtures()
+	>>> glicko = Rate(fixtures, model=Glicko)
+	>>> glicko.rate_fixtures();
+
+	>>> plt.figure(figsize=(8,8))
+	>>> elo.plot_roc_curve()
+	>>> glicko.plot_roc_curve()
+	>>> plt.show()
 	"""
-	def __init__(self,fixtures,model, start_rating=1500,sigma=350,seed=1234,**kwgs):
+
+	def __init__(self,fixtures,model, start_rating=1500,sigma=350, season_regress=0.33, seed=1234,**kwgs):
 		self.seed=seed
+		self.season_regress=season_regress
 		### dataset used for prediction
 		self.prediction = fixtures[fixtures['has_finished']==False]\
 				.sort_values('starting_datetime').reset_index(drop=True)
@@ -31,7 +46,10 @@ class Rate(object):
 		self.sigma = sigma
 		self.model = model(sigma=sigma, **kwgs)
 		self.__init_ratings__(start_rating)
-		self._nba_spread_gamma()
+		self._compute_outcomes()
+		self.fixtures['is_new_season'] = (self.fixtures['season_name'] != self.fixtures['season_name'].shift(1)).astype(int)
+
+		self.nba_gamma_function =  self._nba_spread_gamma(use_preset=True)
 
 
 	def __init_ratings__(self, start_rating):
@@ -73,44 +91,57 @@ class Rate(object):
 		return True
 
 
-	def _nba_spread_gamma(self, alpha=None, beta=None, loc=None, size=None):
+	def _nba_spread_gamma(self, use_preset=True):
 		"""
 		Function to create spread distribution.
 		"""
 		np.random.seed(self.seed)
 
-		### pre-set values (based on nba data from 2012-2019)
-		alpha = alpha or 1.8415843797113318
-		loc = loc or -0.006494101048288639
-		beta = beta or 6.086268833321849
+		if use_preset:
+			### pre-set values (based on nba data from 2012-2019)
+			alpha = 1.8415843797113318
+			loc = -0.006494101048288639
+			beta = 6.086268833321849
 
-		### we can also fit to our data:
-		## alpha, loc, beta=stats.gamma.fit(self.fixtures['score_diff'].values)
+			return {
+				'alpha': 1.8415843797113318,
+				'loc': -0.006494101048288639,
+				'beta': 6.086268833321849}
 
-		size = size or 100000
+		### we can also fit our score_diff data to a gamma distribution.
+		alpha, loc, beta=stats.gamma.fit(
+				np.abs(self.fixtures['score_diff'].values)
+			)
 
-		self.nba_spread_dist= stats.gamma.rvs(alpha,loc=loc,scale=beta,size=size)
-		return True
+		return {'alpha': alpha, 'loc': loc, 'beta': beta}
 
 
 	def _nba_spread(self, prob, digits=1):
 		"""
 		Function to calculate the spread based on the probability.
 		"""
-		prob = np.where(prob>0.95,0.95, prob)
-		pct = (abs(prob-0.50)*2)*100
-		spread = np.round(np.percentile(self.nba_spread_dist, pct), digits)
-		spread = np.where(pct>50,-spread,spread)
+		prob = np.select([prob<0.95, prob>=0.95], [prob, 0.95])
+		pct = np.abs(prob-0.50)*2
+		# spread = np.round(np.percentile(self.nba_spread_dist, pct), digits)
+		spread = np.round(
+			stats.gamma.ppf(pct,
+				self.nba_gamma_function['alpha'],
+				loc=self.nba_gamma_function['loc'],
+				scale=self.nba_gamma_function['beta']
+			), digits)
+
+		spread = np.where(prob>.50,-spread,spread)
 		return spread
 
 
-	def _regress_to_mean(self, rate=0.33):
+	def _regress_to_mean(self, rate=None):
 		"""
 		Regress the ratings to the mean, using a rate (0<rate<1) of decay.
 		Parameters:
 		----------
 			- rate: (float): rate of decay for all ratings.
 		"""
+		rate = rate or self.season_regress
 		mean = np.array([
 			self.team_ratings['rating'][k] for k in self.team_ratings['rating']
 		]).mean()
@@ -153,6 +184,11 @@ class Rate(object):
 
 
 	def _rate_match_elo(self, row):
+
+		if row['is_new_season'] == 1:
+			## only applicable to ELO
+			self._regress_to_mean()
+
 		phome, pvis, hpost, vpost = self.model.rate(
 			self.hpre,self.vpre,outcome=self.outcome, score_diff=self.score_diff
 		)
@@ -168,7 +204,8 @@ class Rate(object):
 
 	def rate_match(self, row):
 		"""
-		Params:
+		Parameters
+		----------
 			- row: matchup, or row of fixtures
 			- use_rd (default=False): whether to use ratings deviation (std.)
 		"""
@@ -186,14 +223,13 @@ class Rate(object):
 		"""
 		Rate all fixtures. Perhaps it could be done with a rolling function.
 		"""
-		self._compute_outcomes()
 		# ratings = []
 		ratings = self.fixtures.apply(self.rate_match, axis=1)
 		self.fixtures = self.fixtures.join(pd.DataFrame(ratings.values.tolist()))
 
 		### apply predicted spreads
-		self.fixtures['hp_spread'] = self._nba_spread(self.fixtures['phome'])
-		self.fixtures['vp_spread'] = self._nba_spread(self.fixtures['pvis'])
+		self.fixtures['hp_spread'] = self._nba_spread(self.fixtures['phome'].values)
+		self.fixtures['vp_spread'] = self._nba_spread(self.fixtures['pvis'].values)
 
 		return self.fixtures
 
@@ -206,7 +242,7 @@ class Rate(object):
 			self.team_ratings['rating'][team1],
 			self.team_ratings['rating'][team2],
 		)
-		return {'home_prob': home_prob, 'vis_prob': vis_prob}
+		return {'phome': home_prob, 'pvis': vis_prob}
 
 	def _predict_prob_glicko(self,row):
 		team1 = row['localteam_id']
@@ -219,7 +255,7 @@ class Rate(object):
 			self.team_ratings['rd'][team2]
 		)
 
-		return {'home_prob': home_prob, 'vis_prob': vis_prob}
+		return {'phome': home_prob, 'pvis': vis_prob}
 
 
 	def predict_prob(self, row):
@@ -240,12 +276,30 @@ class Rate(object):
 
 		### apply predicted spreads
 		self.upcoming_fixtures['hp_spread'] = \
-							self._nba_spread(self.upcoming_fixtures['phome'])
+							self._nba_spread(self.upcoming_fixtures['phome'].values)
 		self.upcoming_fixtures['vp_spread'] = \
-							self._nba_spread(self.upcoming_fixtures['pvis'])
+							self._nba_spread(self.upcoming_fixtures['pvis'].values)
 		return self.upcoming_fixtures
 
 
 	def plot_team_ratings(self, team_id, **kwargs):
 		_ratings = self.historical_ratings[team_id]
 		return plt.plot(_ratings, **kwargs)
+
+	def auc_score(self):
+		y_pred_proba = self.fixtures['phome'].values
+		y_test = (self.fixtures['score_diff'] > 0).values
+		return metrics.roc_auc_score(y_test, y_pred_proba)
+
+	def plot_roc_curve(self):
+		y_pred_proba = self.fixtures['phome'].values
+		y_test = (self.fixtures['score_diff'] > 0).values
+
+		auc_score = self.auc_score()
+		fpr, tpr, _ = metrics.roc_curve(y_test,  y_pred_proba)
+
+		plt.plot(fpr,tpr,
+				label=f'{self.model.__modelname__.capitalize()}, auc={auc_score:.3f}')
+		plt.plot([0.0, 1.0],[0.0, 1.0],'--', c='black', ) #baseline (random)
+		plt.legend(loc=4)
+		return
