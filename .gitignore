@@ -8,3 +8,4 @@ output data/
 !home-team-advantage.ipynb
 !elo_construction.ipynb
 !Code Idealization.ipynb
+*/__pycache__

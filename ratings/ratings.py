@@ -259,7 +259,7 @@ class Rate(object):
 		:param results_by_league: calculate ratings for each league individually, defaults to False
 		:param results_per_season: calculate ratings for each season individually, defaults to False
 		:param rt_mean: regress ratings to league mean after each season, defaults to False
-		:param rt_mean_degree: amount to regress to mean, defaults to 1/3
+		:param rt_mean_amnt: amount to regress to mean, defaults to 1/3
 		:param tie_probability: recommended to be left to 'True' - calculates tie probability when there are tie outcomes
 
 		Note that if results_by_league is False and results_by_season is True, only one league should be passed as data
