@@ -3,6 +3,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import scipy.stats as stats
 from sklearn import metrics
+from .helpers import get_names
+
 '''
 TODO:
 
@@ -15,6 +17,15 @@ TODO:
 class Rate(object):
 	"""
 		Class to apply ratings across a list of fixture dataset.
+
+	Needed Fields:
+	--------------
+		- has_finished: (bool) whether the game finished
+		- start_datetime: (datetime, numeric) order of games
+		- season_name: (str) season name
+		- localteam_id / visitorteam_id: (str, int) team ids
+		- localteam_score / visitorteam_score: (str, float) team scores
+
 
 	Example
 	-------
@@ -29,64 +40,69 @@ class Rate(object):
 	>>> plt.show()
 	"""
 
-	def __init__(self,fixtures,model, start_rating=1500,sigma=350, season_regress=0.33, seed=1234,**kwgs):
+	def __init__(self, model, start_rating=1500, sigma=350,
+				season_regress=0.33, seed=1234, **kwgs):
+
 		self.seed=seed
 		self.season_regress=season_regress
+		self.start_rating = start_rating
 		### dataset used for prediction
-		self.prediction = fixtures[fixtures['has_finished']==False]\
-				.sort_values('starting_datetime').reset_index(drop=True)
+		# self.prediction = fixtures[fixtures['has_finished']==False]\
+		# 		.sort_values('start_datetime').reset_index(drop=True)
 
 		### dataset used for historical assessment / regression
-		self.fixtures = fixtures[fixtures['has_finished']==True]\
-				.sort_values('starting_datetime').reset_index(drop=True)
-
-		self.upcoming_fixtures = fixtures[fixtures['has_finished']==False]\
-				.sort_values('starting_datetime').reset_index(drop=True)
+		# self.ht, self.vt, self.hs, self.vs, self.ss, self.sd = get_names(train)
+		# self.fixtures = train.sort_values(self.sd).reset_index(drop=True)
+		#
+		# self.upcoming_fixtures = fixtures[fixtures['has_finished']==False]\
+		# 		.sort_values('start_datetime').reset_index(drop=True)
 
 		self.sigma = sigma
 		self.model = model(sigma=sigma, **kwgs)
-		self.__init_ratings__(start_rating)
-		self._compute_outcomes()
-		self.fixtures['is_new_season'] = (self.fixtures['season_name'] != self.fixtures['season_name'].shift(1)).astype(int)
-
 		self.nba_gamma_function =  self._nba_spread_gamma(use_preset=True)
 
+		# self._init_ratings(start_rating)
 
-	def __init_ratings__(self, start_rating):
+
+
+	def _init_ratings(self, start_rating):
 		"""
 			Initialize all ratings to start_rating
 		"""
-		h = self.fixtures[['localteam_id']]\
-				.rename(columns={'localteam_id':'team_id'})
-		v = self.fixtures[['visitorteam_id']]\
-				.rename(columns={'visitorteam_id':'team_id'})
+		h = self.fixtures[[self.ht]].rename(columns={self.ht:'team_id'})
+		v = self.fixtures[[self.vt]].rename(columns={self.vt:'team_id'})
 		teams = pd.concat([h,v], axis=0, sort=False, ignore_index=True)\
 					.drop_duplicates()
 		teams['rating'] = start_rating
 		teams['rd'] = self.sigma
 
 		self.team_ratings = teams.set_index('team_id').to_dict()#['rating']
-
 		self.historical_ratings = {
 				team_id: [] for team_id in self.team_ratings['rating'].keys()
 			}
+		self._compute_outcomes()
+		self.fixtures['is_new_season'] = (self.fixtures[self.ss] != \
+									self.fixtures[self.ss].shift(1)).astype(int)
 
 		return True
 
 
 	def _compute_outcomes(self):
 		conditions = [
-			self.fixtures['localteam_score']>self.fixtures['visitorteam_score'],
-			self.fixtures['visitorteam_score']>self.fixtures['localteam_score'],
-			self.fixtures['localteam_score']==self.fixtures['visitorteam_score']
+			self.fixtures[self.hs]>self.fixtures[self.vs],
+			self.fixtures[self.vs]>self.fixtures[self.hs],
+			self.fixtures[self.hs]==self.fixtures[self.vs]
 		]
 		choices = [ 1, 0, 0.5 ]
 
 		self.fixtures['outcome'] = np.select(conditions, choices)
 
+		### DROP NA FOR SCORE FIELDS. IF NO SCORE, NOT USED IN TRAINING
+		self.fixtures.dropna(subset=[self.hs,self.vs])
+
 		### CALCULATING SCORE_DIFF AS A FUNCTION OF HOMETEAM
-		self.fixtures['score_diff'] = self.fixtures['localteam_score'] - \
-										self.fixtures['visitorteam_score']
+		self.fixtures['score_diff'] = self.fixtures[self.hs].astype(float) - \
+											self.fixtures[self.vs].astype(float)
 
 		return True
 
@@ -168,11 +184,11 @@ class Rate(object):
 			self.hpre, self.vpre, self.outcome, self.h_rd_pre, self.v_rd_pre
 		)
 
-		self._update_team_rd(row['localteam_id'], h_rd_post)
-		self._update_team_rd(row['visitorteam_id'], v_rd_post)
+		self._update_team_rd(row[self.ht], h_rd_post)
+		self._update_team_rd(row[self.vt], v_rd_post)
 
-		self._update_team_rating(row['localteam_id'], hpost)
-		self._update_team_rating(row['visitorteam_id'], vpost)
+		self._update_team_rating(row[self.ht], hpost)
+		self._update_team_rating(row[self.vt], vpost)
 
 		return {
 			'hpre':self.hpre, 'vpre': self.vpre,
@@ -193,8 +209,8 @@ class Rate(object):
 			self.hpre,self.vpre,outcome=self.outcome, score_diff=self.score_diff
 		)
 
-		self._update_team_rating(row['localteam_id'], hpost)
-		self._update_team_rating(row['visitorteam_id'], vpost)
+		self._update_team_rating(row[self.ht], hpost)
+		self._update_team_rating(row[self.vt], vpost)
 
 		return {
 			'hpre': self.hpre, 'vpre': self.vpre, 'phome': phome,
@@ -209,20 +225,24 @@ class Rate(object):
 			- row: matchup, or row of fixtures
 			- use_rd (default=False): whether to use ratings deviation (std.)
 		"""
-		self.hpre = self.team_ratings['rating'][row['localteam_id']]
-		self.vpre = self.team_ratings['rating'][row['visitorteam_id']]
-		self.h_rd_pre = self.team_ratings['rd'][row['localteam_id']]
-		self.v_rd_pre = self.team_ratings['rd'][row['visitorteam_id']]
+		self.hpre = self.team_ratings['rating'][row[self.ht]]
+		self.vpre = self.team_ratings['rating'][row[self.vt]]
+		self.h_rd_pre = self.team_ratings['rd'][row[self.ht]]
+		self.v_rd_pre = self.team_ratings['rd'][row[self.vt]]
 		self.outcome = row['outcome']
 		self.score_diff = row['score_diff']
 
 		return getattr(self, f'_rate_match_{self.model.__modelname__}')(row)
 
 
-	def rate_fixtures(self):#, use_rd=False):
+	def rate_fixtures(self, train, start_rating=1500):#, use_rd=False):
 		"""
 		Rate all fixtures. Perhaps it could be done with a rolling function.
 		"""
+		self.ht, self.vt, self.hs, self.vs, self.ss, self.sd = get_names(train)
+		self.fixtures = train.sort_values(self.sd).reset_index(drop=True)
+		self._init_ratings(start_rating=start_rating)
+
 		# ratings = []
 		ratings = self.fixtures.apply(self.rate_match, axis=1)
 		self.fixtures = self.fixtures.join(pd.DataFrame(ratings.values.tolist()))
@@ -235,8 +255,8 @@ class Rate(object):
 
 
 	def _predict_prob_elo(self, row):
-		team1 = row['localteam_id']
-		team2 = row['visitorteam_id']
+		team1 = row[self.ht]
+		team2 = row[self.vt]
 
 		home_prob, vis_prob = self.model.predict_prob(
 			self.team_ratings['rating'][team1],
@@ -245,8 +265,8 @@ class Rate(object):
 		return {'phome': home_prob, 'pvis': vis_prob}
 
 	def _predict_prob_glicko(self,row):
-		team1 = row['localteam_id']
-		team2 = row['visitorteam_id']
+		team1 = row[self.ht]
+		team2 = row[self.vt]
 
 		home_prob, vis_prob = self.model.predict_prob(
 			self.team_ratings['rating'][team1],
@@ -265,21 +285,23 @@ class Rate(object):
 		return getattr(self, f'_predict_prob_{self.model.__modelname__}')(row)
 
 
-	def predict_fixtures(self):
+	def predict_fixtures(self, fixtures):
 		"""
 		Predict winning probability for future matches.
 		"""
-		ratings = self.upcoming_fixtures.apply(self.predict_prob, axis=1)
-		self.upcoming_fixtures = self.upcoming_fixtures.join(
+		self.ht, self.vt, self.hs, self.vs, self.ss, self.sd = get_names(fixtures)
+		# fixtures = fixtures or self.upcoming_fixtures
+		ratings = fixtures.apply(self.predict_prob, axis=1)
+		fixtures = fixtures.join(
 			pd.DataFrame(ratings.values.tolist())
 		)
 
 		### apply predicted spreads
-		self.upcoming_fixtures['hp_spread'] = \
-							self._nba_spread(self.upcoming_fixtures['phome'].values)
-		self.upcoming_fixtures['vp_spread'] = \
-							self._nba_spread(self.upcoming_fixtures['pvis'].values)
-		return self.upcoming_fixtures
+		fixtures['hp_spread'] = \
+							self._nba_spread(fixtures['phome'].values)
+		fixtures['vp_spread'] = \
+							self._nba_spread(fixtures['pvis'].values)
+		return fixtures
 
 
 	def plot_team_ratings(self, team_id, **kwargs):
