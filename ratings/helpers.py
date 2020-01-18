@@ -197,6 +197,9 @@ def graph_roc_auc(roc_auc, fpr, tpr, n_classes):
 
 
 def _get_name(array, optional, needed=['']):
+	"""
+	Loop through array until name has part of <needed[i]> and of <optional>
+	"""
 	for has_t in optional:
 		for i in array:
 			if has_t in i:
@@ -204,10 +207,11 @@ def _get_name(array, optional, needed=['']):
 					if need_it in i:
 						array.remove(i)
 						return i, array
+						
 	raise ValueError(f'Could not find a match for {optional}')
 
 
-def get_names(df, greedy=True):
+def get_names(df, simplified=False):
 	"""
 	Use a string match to find out which fields are which, if not specified.
 	"""
@@ -216,8 +220,13 @@ def get_names(df, greedy=True):
 	date_prefixes = ['date','hour','start','order','sequence']
 
 	cols = df.columns.tolist()
-	home_col, cols = _get_name(cols, ['home','local'], ['team'])
-	vis_col, cols = _get_name(cols, ['vis','away'], ['team'])
+
+	home_col, cols = _get_name(cols, ['home','local'], ['team','t'])
+	vis_col, cols = _get_name(cols, ['vis','away'], ['team','t'])
+
+	if simplified:
+		return home_col, vis_col
+
 	home_score, cols =  _get_name(cols, ['home','local','h','l'], ['score','points','pts','goals'])
 	vis_score, cols =  _get_name(cols, ['vis','away','v','a'], ['score','points','pts','goals'])
 	season, cols = _get_name(cols, ['season','year','league'])

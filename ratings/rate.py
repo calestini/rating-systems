@@ -98,7 +98,7 @@ class Rate(object):
 		self.fixtures['outcome'] = np.select(conditions, choices)
 
 		### DROP NA FOR SCORE FIELDS. IF NO SCORE, NOT USED IN TRAINING
-		self.fixtures.dropna(subset=[self.hs,self.vs])
+		self.fixtures.dropna(subset=[self.hs,self.vs], inplace=True)
 
 		### CALCULATING SCORE_DIFF AS A FUNCTION OF HOMETEAM
 		self.fixtures['score_diff'] = self.fixtures[self.hs].astype(float) - \
@@ -289,7 +289,7 @@ class Rate(object):
 		"""
 		Predict winning probability for future matches.
 		"""
-		self.ht, self.vt, self.hs, self.vs, self.ss, self.sd = get_names(fixtures)
+		self.ht, self.vt = get_names(fixtures, simplified=True)
 		# fixtures = fixtures or self.upcoming_fixtures
 		ratings = fixtures.apply(self.predict_prob, axis=1)
 		fixtures = fixtures.join(
