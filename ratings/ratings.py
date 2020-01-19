@@ -7,7 +7,7 @@ from .elo import Elo
 from .glicko import Glicko
 
 ### SILENCE WARNING IN PRODUCTION
-pd.options.mode.chained_assignment = None
+# pd.options.mode.chained_assignment = None
 
 class Rate(object):
 

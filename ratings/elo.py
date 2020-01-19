@@ -5,7 +5,6 @@ import math
 from .exceptions import InvalidSDMedhod
 
 
-
 class Elo(object):
 
 	"""

@@ -207,7 +207,7 @@ def _get_name(array, optional, needed=['']):
 					if need_it in i:
 						array.remove(i)
 						return i, array
-						
+
 	raise ValueError(f'Could not find a match for {optional}')
 
 
@@ -221,8 +221,8 @@ def get_names(df, simplified=False):
 
 	cols = df.columns.tolist()
 
-	home_col, cols = _get_name(cols, ['home','local'], ['team','t'])
-	vis_col, cols = _get_name(cols, ['vis','away'], ['team','t'])
+	home_col, cols = _get_name(cols, ['home','local'], ['teamid','team_id','id'])
+	vis_col, cols = _get_name(cols, ['vis','away'], ['teamid','team_id','id'])
 
 	if simplified:
 		return home_col, vis_col
