@@ -289,9 +289,11 @@ class Rate(object):
 		"""
 		Predict winning probability for future matches.
 		"""
+		fixtures = fixtures.reset_index(drop=True) ## needed
 		self.ht, self.vt = get_names(fixtures, simplified=True)
 		# fixtures = fixtures or self.upcoming_fixtures
 		ratings = fixtures.apply(self.predict_prob, axis=1)
+
 		fixtures = fixtures.join(
 			pd.DataFrame(ratings.values.tolist())
 		)

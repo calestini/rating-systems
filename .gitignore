@@ -9,3 +9,4 @@ output data/
 !elo_construction.ipynb
 !Code Idealization.ipynb
 */__pycache__
+nba_rating_load.py
