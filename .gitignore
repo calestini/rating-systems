@@ -10,3 +10,4 @@ output data/
 !Code Idealization.ipynb
 */__pycache__
 nba_rating_load.py
+__pycache__/
