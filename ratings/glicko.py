@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import numpy as np
 import math
-import logging
+# import logging
 
 
 class Glicko(object):

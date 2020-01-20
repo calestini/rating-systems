@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import scipy.stats as stats
-from sklearn import metrics
+
 from .helpers import get_names
 
 '''
@@ -307,15 +307,25 @@ class Rate(object):
 
 
 	def plot_team_ratings(self, team_id, **kwargs):
+		## local import
+		import matplotlib.pyplot as plt
+
 		_ratings = self.historical_ratings[team_id]
 		return plt.plot(_ratings, **kwargs)
 
 	def auc_score(self):
+		## local import
+		from sklearn import metrics
+
 		y_pred_proba = self.fixtures['phome'].values
 		y_test = (self.fixtures['score_diff'] > 0).values
 		return metrics.roc_auc_score(y_test, y_pred_proba)
 
 	def plot_roc_curve(self):
+		## local import
+		import matplotlib.pyplot as plt
+		from sklearn import metrics
+
 		y_pred_proba = self.fixtures['phome'].values
 		y_test = (self.fixtures['score_diff'] > 0).values
 
