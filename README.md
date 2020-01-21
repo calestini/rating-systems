@@ -5,9 +5,9 @@ Implementation of the rating systems to rank sports teams.
 ## Available
 
 - Elo
-	- logistic (logistic decay of score difference)
-	- power (power decay of score difference)
-	- fte (FiveThirtyEight calculation)
+	- `logistic` (logistic decay of score difference)
+	- `power` (power decay of score difference)
+	- `fte` ([FiveThirtyEight](https://fivethirtyeight.com/methodology/how-our-nfl-predictions-work/) calculation)
 - Glicko
 
 ## Usage
@@ -45,4 +45,4 @@ plt.show()
 
 ![image](example_roc.png)
 
-## Optimzation
+## Optimization
