@@ -150,9 +150,13 @@ class Elo(object):
 
 	def _score_diff_logistic(self):
 		"""
-		logistic function that intersects 1 at 1
+		logistic function that intersects 1 at 1.
+		This function ranges from 1. (score diff = 1) to 2. (max score diff ~inf)
+		The reason why it has a 2 on the nominator is to set that limit [1-2),
+		so the score factor will always range from 1X to 2X the Elo rating. 
 		"""
 		self.sd = 2/(1+np.exp(-self.m * (self.score_diff - 1)))
+		return self.sd
 
 
 	def _score_diff_fte(self):
